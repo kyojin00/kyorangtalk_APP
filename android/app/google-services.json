@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "54388432481",
+    "project_id": "kyorang-talk-3f8a0",
+    "storage_bucket": "kyorang-talk-3f8a0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:54388432481:android:535639fb76c45ef8005420",
+        "android_client_info": {
+          "package_name": "com.kyorang.kyorang_talk"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "54388432481-33nndtietu4jitbr0dumeo70ep6aplet.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kyorang.kyorang_talk",
+            "certificate_hash": "97aab38e5ec8f40dad228dcbb7f13b8b7fecf0b6"
+          }
+        },
+        {
+          "client_id": "54388432481-v8n3a8ijv4m5as0kltofu1jn00puu1tc.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCILXJLCBYlM507mka0JurMYL-1dWtKsAw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "54388432481-v8n3a8ijv4m5as0kltofu1jn00puu1tc.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
