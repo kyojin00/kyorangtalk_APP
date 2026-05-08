@@ -24,6 +24,8 @@ AppBar buildChatAppBar({
   required VoidCallback onBlock,
   required VoidCallback onReport,
   required VoidCallback onNotFriendTap,
+  required VoidCallback onGallery,                                // ⭐ NEW
+  required VoidCallback onMemory,                                 // ⭐ NEW
 }) {
   final showNotFriendBadge = isStatusLoaded &&
       isBlocked == false &&
@@ -93,6 +95,8 @@ AppBar buildChatAppBar({
             case 'add_friend': onAddFriend();  break;
             case 'block':      onBlock();      break;
             case 'report':     onReport();     break;
+            case 'gallery':    onGallery();    break;          // ⭐ NEW
+            case 'memory':     onMemory();     break;          // ⭐ NEW
           }
         },
         itemBuilder: (_) => _buildMenuItems(
@@ -191,6 +195,15 @@ List<PopupMenuEntry<String>> _buildMenuItems({
   return [
     _menuItem('profile', Icons.person_outline, '프로필 보기',
         AppTheme.textSub, AppTheme.textMain),
+
+    // ⭐ NEW: 갤러리/추억 (대화 관련 묶음)
+    const PopupMenuDivider(height: 1),
+    _menuItem('gallery', Icons.photo_library_outlined, '갤러리',
+        AppTheme.textSub, AppTheme.textMain),
+    _menuItem('memory', Icons.favorite_outline, '추억',
+        AppTheme.textSub, AppTheme.textMain),
+    const PopupMenuDivider(height: 1),
+
     if (friendStatus == 'none' &&
         isBlocked == false &&
         isBlockedByPartner == false)

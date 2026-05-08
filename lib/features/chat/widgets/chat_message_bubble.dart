@@ -3,8 +3,13 @@ import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../../polls/widgets/poll_bubble.dart';
 import '../models/message_model.dart';
+import '../services/link_preview_service.dart';                 // ⭐ NEW
 import 'file_bubble.dart';
 import 'game_bubble.dart';
+import 'link_preview_card.dart';                                // ⭐ NEW
+import 'linkified_text.dart';                                   // ⭐ NEW
+import 'multi_image_grid.dart';
+import 'reaction_chips.dart';
 import 'voice_message_bubble.dart';
 
 // ═══════════════════════════════════════════════════
@@ -22,10 +27,10 @@ class MessageGroup {
 class MessageListItem {
   final String? dateLabel;
   final MessageModel? message;
-  
+
   MessageListItem.dateDivider(this.dateLabel) : message = null;
   MessageListItem.message(this.message) : dateLabel = null;
-  
+
   bool get isDivider => dateLabel != null;
 }
 
@@ -34,6 +39,7 @@ class MessageListItem {
 // ═══════════════════════════════════════════════════
 class MessageBubble extends StatelessWidget {
   final MessageModel msg;
+  final String roomId;
   final bool isMe;
   final String timeStr;
   final bool isHighlighted;
@@ -47,6 +53,7 @@ class MessageBubble extends StatelessWidget {
   const MessageBubble({
     super.key,
     required this.msg,
+    required this.roomId,
     required this.isMe,
     required this.timeStr,
     required this.isHighlighted,
@@ -58,54 +65,35 @@ class MessageBubble extends StatelessWidget {
     this.onImageLoad,
   });
 
-  Widget _buildHighlightedText(String text, String query) {
-    if (query.isEmpty || msg.isDeleted) {
+  // ⭐ 텍스트 메시지 렌더 (URL 자동 감지 + 검색 하이라이트)
+  Widget _buildText(String text) {
+    if (msg.isDeleted) {
       return Text(
-        msg.isDeleted ? '삭제된 메시지예요' : text,
+        '삭제된 메시지예요',
         style: TextStyle(
-          color: msg.isDeleted ? AppTheme.textSub : AppTheme.textMain,
+          color: isMe
+              ? Colors.white.withOpacity(0.7)
+              : AppTheme.textSub,
           fontSize: 14,
           height: 1.5,
-          fontStyle: msg.isDeleted ? FontStyle.italic : FontStyle.normal,
+          fontStyle: FontStyle.italic,
         ),
       );
     }
-
-    final lowerText = text.toLowerCase();
-    final lowerQuery = query.toLowerCase();
-    final spans = <TextSpan>[];
-    int start = 0;
-
-    while (true) {
-      final idx = lowerText.indexOf(lowerQuery, start);
-      if (idx == -1) {
-        spans.add(TextSpan(
-          text: text.substring(start),
-          style: TextStyle(
-              color: AppTheme.textMain, fontSize: 14, height: 1.5),
-        ));
-        break;
-      }
-      if (idx > start) {
-        spans.add(TextSpan(
-          text: text.substring(start, idx),
-          style: TextStyle(
-              color: AppTheme.textMain, fontSize: 14, height: 1.5),
-        ));
-      }
-      spans.add(TextSpan(
-        text: text.substring(idx, idx + query.length),
-        style: const TextStyle(
-          color: Colors.black,
-          fontSize: 14,
-          height: 1.5,
-          fontWeight: FontWeight.w800,
-          backgroundColor: Color(0xFFFBBF24),
-        ),
-      ));
-      start = idx + query.length;
-    }
-    return RichText(text: TextSpan(children: spans));
+    return LinkifiedText(
+      text: text,
+      baseStyle: TextStyle(
+        // ⭐ 보낸 메시지는 보라색 배경이라 흰색 텍스트로 가독성 확보
+        color: isMe ? Colors.white : AppTheme.textMain,
+        fontSize: 14,
+        height: 1.5,
+      ),
+      searchQuery: searchQuery,
+      // 보낸 사람 색상에 맞춰 링크 색
+      linkColor: isMe
+          ? const Color(0xFFE0F2FE) // 보낸 메시지 (purple bubble): 밝은 하늘색
+          : const Color(0xFF60A5FA), // 받은 메시지: 표준 파랑
+    );
   }
 
   Widget _buildContent(BuildContext context) {
@@ -157,76 +145,26 @@ class MessageBubble extends StatelessWidget {
           ),
         ),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: _buildHighlightedText(msg.content, searchQuery),
+        child: _buildText(msg.content),
       );
     }
 
-    // 이미지 메시지
-    if (msg.imageUrl != null) {
-      return Container(
-        decoration: BoxDecoration(
-          color: isMe ? AppTheme.primary : AppTheme.border,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(18),
-            topRight: const Radius.circular(18),
-            bottomLeft: Radius.circular(isMe ? 18 : 4),
-            bottomRight: Radius.circular(isMe ? 4 : 18),
-          ),
-        ),
-        child: GestureDetector(
-          onTap: () => onImageTap(msg.imageUrl!),
-          child: ClipRRect(
-            borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(18),
-              topRight: const Radius.circular(18),
-              bottomLeft: Radius.circular(isMe ? 18 : 4),
-              bottomRight: Radius.circular(isMe ? 4 : 18),
-            ),
-            child: Stack(
-              children: [
-                Image.network(
-                  msg.imageUrl!,
-                  width: 200,
-                  fit: BoxFit.cover,
-                  loadingBuilder: (ctx, child, progress) {
-                    if (progress == null) {
-                      WidgetsBinding.instance
-                          .addPostFrameCallback((_) => onImageLoad?.call());
-                      return child;
-                    }
-                    return Container(
-                      width: 200,
-                      height: 150,
-                      color: AppTheme.border,
-                      child: const Center(
-                        child: CircularProgressIndicator(
-                            color: AppTheme.primary, strokeWidth: 2),
-                      ),
-                    );
-                  },
-                ),
-                Positioned(
-                  bottom: 6,
-                  right: 6,
-                  child: Container(
-                    padding: const EdgeInsets.all(4),
-                    decoration: BoxDecoration(
-                      color: Colors.black45,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: const Icon(Icons.zoom_in,
-                        color: Colors.white, size: 14),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+    // ⭐ 이미지 메시지 (단일 + 다중)
+    if (msg.allImageUrls.isNotEmpty) {
+      return MultiImageGrid(
+        imageUrls: msg.allImageUrls,
+        isMe: isMe,
+        timeStr: timeStr,
+        senderName: partnerName,
       );
     }
 
-    // 텍스트 메시지
-    return Container(
+    // ⭐⭐⭐ 텍스트 메시지 - 버블 + URL 있으면 미리보기 카드 같이
+    final firstUrl = extractFirstUrl(msg.content);
+    print('🔗 [Bubble] msgId=${msg.id} content="${msg.content}" '
+        'firstUrl=$firstUrl');
+
+    final bubble = Container(
       decoration: BoxDecoration(
         color: isMe ? AppTheme.primary : AppTheme.border,
         borderRadius: BorderRadius.only(
@@ -237,7 +175,23 @@ class MessageBubble extends StatelessWidget {
         ),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      child: _buildHighlightedText(msg.content, searchQuery),
+      child: _buildText(msg.content),
+    );
+
+    if (firstUrl == null) {
+      print('🔗 [Bubble] firstUrl null → bubble만 반환');
+      return bubble;
+    }
+
+    print('🔗 [Bubble] firstUrl 있음 → Column(bubble + LinkPreviewCard) 반환');
+    return Column(
+      crossAxisAlignment:
+          isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        bubble,
+        LinkPreviewCard(url: firstUrl, isMe: isMe),
+      ],
     );
   }
 
@@ -329,6 +283,20 @@ class MessageBubble extends StatelessWidget {
                             fontSize: 10, color: AppTheme.textMuted)),
                   ],
                 ],
+              ),
+
+              // 메시지 반응 칩
+              Padding(
+                padding: EdgeInsets.only(
+                  left: isMe ? 0 : 34,
+                  right: isMe ? 4 : 0,
+                ),
+                child: ReactionChips(
+                  messageId: msg.id,
+                  roomId: roomId,
+                  isGroup: false,
+                  isMe: isMe,
+                ),
               ),
             ],
           ),

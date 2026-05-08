@@ -11,6 +11,7 @@ import '../../../core/notifications/notification_service.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../models/group_room_model.dart';
 import '../providers/group_chat_provider.dart';
+import '../widgets/password_dialog.dart';                       // ⭐ NEW
 import '../../../features/friends/screens/friends_screen.dart';
 import 'open_room_preview_screen.dart';
 import 'group_chat_room_screen.dart';
@@ -31,12 +32,25 @@ extension on OpenRoomSort {
       case OpenRoomSort.recent:  return '최신순';
     }
   }
-  
+
   IconData get icon {
     switch (this) {
       case OpenRoomSort.popular: return Icons.favorite_rounded;
       case OpenRoomSort.members: return Icons.people_rounded;
       case OpenRoomSort.recent:  return Icons.access_time_rounded;
+    }
+  }
+}
+
+// ⭐ NEW: 내 채팅방 안의 그룹/오픈 분리용
+enum MyRoomFilter { all, group, open }
+
+extension on MyRoomFilter {
+  String get label {
+    switch (this) {
+      case MyRoomFilter.all:   return '전체';
+      case MyRoomFilter.group: return '그룹';
+      case MyRoomFilter.open:  return '오픈';
     }
   }
 }
@@ -63,11 +77,12 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
   String _selectedCategory = '전체';
   OpenRoomSort _sortBy = OpenRoomSort.popular;
 
+  // ⭐ NEW: 내 채팅방 필터
+  MyRoomFilter _myRoomFilter = MyRoomFilter.all;
+
   Timer? _uiRefreshTimer;
 
-  // ✨ 이전 상태 추적 (새 메시지 감지)
   final Map<String, int> _previousUnreadCounts = {};
-  // ✨ 초기 로드 끝났는지 플래그 (첫 로드에선 배너 안 띄움)
   bool _isInitialized = false;
 
   @override
@@ -97,9 +112,7 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
     super.dispose();
   }
 
-  // ✨ 새 메시지 감지 → 배너 표시
   Future<void> _checkNewMessages(List<GroupRoomModel> rooms) async {
-    // 첫 로드는 스킵
     if (!_isInitialized) {
       for (final room in rooms) {
         _previousUnreadCounts[room.id] = room.unreadCount;
@@ -108,12 +121,10 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
       return;
     }
 
-    // 새 메시지 감지
     for (final room in rooms) {
       final prevUnread = _previousUnreadCounts[room.id] ?? 0;
 
       if (room.unreadCount > prevUnread) {
-        // 현재 보고 있는 방이면 스킵
         if (currentOpenGroupRoomId == room.id) continue;
 
         try {
@@ -136,7 +147,6 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
 
           if (!mounted) return;
 
-          // ✨ RangeError 방어: lastMessage가 비어있을 수 있음
           final msgText = room.lastMessage ?? '';
           final displayContent = messagePreviewEnabled
               ? (msgText.isEmpty ? '새 메시지가 도착했어요' : msgText)
@@ -155,7 +165,6 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
       }
     }
 
-    // 이전 상태 업데이트
     _previousUnreadCounts.clear();
     for (final room in rooms) {
       _previousUnreadCounts[room.id] = room.unreadCount;
@@ -258,7 +267,7 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
 
   Future<void> _bulkLeave() async {
     final count = _selectedRoomIds.length;
-    
+
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -272,8 +281,7 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
         content: Text(
           '선택한 $count개 채팅방에서 나가시겠어요?\n'
           '나가면 대화 내용을 볼 수 없어요.',
-          style: TextStyle(
-              color: AppTheme.textSub, fontSize: 14),
+          style: TextStyle(color: AppTheme.textSub, fontSize: 14),
         ),
         actions: [
           TextButton(
@@ -344,6 +352,7 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
     );
   }
 
+  // ⭐⭐⭐ 초대코드 입력 (비번 단계 추가)
   void _showJoinByCodeDialog() {
     final controller = TextEditingController();
     showDialog(
@@ -376,18 +385,7 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
               final code = controller.text.trim();
               if (code.isEmpty) return;
               Navigator.pop(ctx);
-
-              final joined = await joinGroupByCode(code);
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(joined
-                        ? '채팅방에 입장했어요!'
-                        : '유효하지 않은 초대코드예요'),
-                  ),
-                );
-                if (joined) ref.invalidate(groupRoomsProvider);
-              }
+              await _joinByCodeFlow(code);
             },
             child: const Text('입장',
                 style: TextStyle(color: AppTheme.primary)),
@@ -395,6 +393,81 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
         ],
       ),
     );
+  }
+
+  /// 초대코드로 입장 흐름 (비번 다이얼로그 자동 처리)
+  Future<void> _joinByCodeFlow(String code) async {
+    // 1) 비번 보호 여부 확인
+    final needsPw = await codeRequiresPassword(code);
+
+    String? password;
+    if (needsPw) {
+      if (!mounted) return;
+      // 비번 입력받기 (틀리면 재시도)
+      String? errorMsg;
+      while (true) {
+        password = await showRoomPasswordDialog(
+          context,
+          roomName: '초대받은 채팅방',
+          errorMessage: errorMsg,
+        );
+        if (password == null) return; // 취소
+
+        final result = await joinByCodeWithPassword(
+          inviteCode: code,
+          password: password,
+        );
+
+        if (result == JoinResult.ok) break;
+        if (result == JoinResult.notFound) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('유효하지 않은 초대코드예요')),
+            );
+          }
+          return;
+        }
+        if (result == JoinResult.wrongPassword) {
+          errorMsg = '비밀번호가 틀렸어요';
+          continue;
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('입장에 실패했어요')),
+          );
+        }
+        return;
+      }
+      // 성공
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('채팅방에 입장했어요!')),
+        );
+        ref.invalidate(groupRoomsProvider);
+      }
+    } else {
+      // 비번 없는 방
+      final result = await joinByCodeWithPassword(
+        inviteCode: code,
+        password: null,
+      );
+      if (mounted) {
+        if (result == JoinResult.ok) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('채팅방에 입장했어요!')),
+          );
+          ref.invalidate(groupRoomsProvider);
+        } else if (result == JoinResult.notFound) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('유효하지 않은 초대코드예요')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('입장에 실패했어요')),
+          );
+        }
+      }
+    }
   }
 
   void _showSortSheet() {
@@ -485,9 +558,20 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
     return sorted;
   }
 
+  // ⭐⭐⭐ 내 채팅방 필터 적용
+  List<GroupRoomModel> _filterMyRooms(List<GroupRoomModel> rooms) {
+    switch (_myRoomFilter) {
+      case MyRoomFilter.all:
+        return rooms;
+      case MyRoomFilter.group:
+        return rooms.where((r) => !r.isOpen).toList();
+      case MyRoomFilter.open:
+        return rooms.where((r) => r.isOpen).toList();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    // ✨ Provider 변화 감지 → 새 메시지 배너
     ref.listen<AsyncValue<List<GroupRoomModel>>>(
       groupRoomsProvider,
       (previous, next) {
@@ -638,6 +722,7 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
                       ? const NeverScrollableScrollPhysics()
                       : null,
                   children: [
+                    // ─── 내 채팅방 ───
                     myRoomsAsync.when(
                       loading: () => const Center(
                         child: CircularProgressIndicator(
@@ -645,15 +730,13 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
                       ),
                       error: (e, _) => Center(
                         child: Text('오류: $e',
-                            style: TextStyle(
-                                color: AppTheme.textSub)),
+                            style: TextStyle(color: AppTheme.textSub)),
                       ),
                       data: (rooms) {
                         if (rooms.isEmpty) {
                           return Center(
                             child: Column(
-                              mainAxisAlignment:
-                                  MainAxisAlignment.center,
+                              mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 const Text('💬',
                                     style: TextStyle(fontSize: 48)),
@@ -666,8 +749,7 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
                                 TextButton.icon(
                                   onPressed: _showCreateDialog,
                                   icon: const Icon(Icons.add,
-                                      color: AppTheme.primary,
-                                      size: 18),
+                                      color: AppTheme.primary, size: 18),
                                   label: const Text('채팅방 만들기',
                                       style: TextStyle(
                                           color: AppTheme.primary)),
@@ -676,47 +758,92 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
                             ),
                           );
                         }
-                        return RefreshIndicator(
-                          color: AppTheme.primary,
-                          onRefresh: () async {
-                            ref.invalidate(groupRoomsProvider);
-                            await Future.delayed(
-                                const Duration(milliseconds: 500));
-                          },
-                          child: ListView.builder(
-                            itemCount: rooms.length,
-                            itemBuilder: (_, i) => _GroupRoomTile(
-                              room: rooms[i],
-                              timeAgo: _timeAgo(rooms[i].lastMessageAt),
-                              selectionMode: _selectionMode,
-                              isSelected: _selectedRoomIds
-                                  .contains(rooms[i].id),
-                              isMuted: mutedRooms.contains(rooms[i].id),
-                              onTap: () {
-                                if (_selectionMode) {
-                                  _toggleSelection(rooms[i].id);
-                                } else {
-                                  currentOpenGroupRoomId = rooms[i].id;
-                                  context.push(
-                                    '/main/group/${rooms[i].id}',
-                                    extra: rooms[i],
-                                  ).then((_) {
-                                    currentOpenGroupRoomId = null;
-                                    ref.invalidate(mutedRoomsProvider);
-                                  });
-                                }
-                              },
-                              onLongPress: () {
-                                if (!_selectionMode) {
-                                  _enterSelectionMode(rooms[i].id);
-                                }
-                              },
+
+                        // ⭐ 그룹/오픈 카운트
+                        final groupCount =
+                            rooms.where((r) => !r.isOpen).length;
+                        final openCount =
+                            rooms.where((r) => r.isOpen).length;
+                        final filtered = _filterMyRooms(rooms);
+
+                        return Column(
+                          children: [
+                            // ⭐ NEW: 세그먼트 (전체 / 그룹 / 오픈)
+                            if (!_selectionMode)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                    16, 12, 16, 8),
+                                child: _MyRoomSegment(
+                                  selected: _myRoomFilter,
+                                  totalCount: rooms.length,
+                                  groupCount: groupCount,
+                                  openCount: openCount,
+                                  onChanged: (f) =>
+                                      setState(() => _myRoomFilter = f),
+                                ),
+                              ),
+                            Expanded(
+                              child: filtered.isEmpty
+                                  ? Center(
+                                      child: Text(
+                                        _myRoomFilter == MyRoomFilter.group
+                                            ? '참여 중인 그룹채팅이 없어요'
+                                            : '참여 중인 오픈채팅이 없어요',
+                                        style: TextStyle(
+                                            color: AppTheme.textSub,
+                                            fontSize: 13),
+                                      ),
+                                    )
+                                  : RefreshIndicator(
+                                      color: AppTheme.primary,
+                                      onRefresh: () async {
+                                        ref.invalidate(groupRoomsProvider);
+                                        await Future.delayed(
+                                            const Duration(milliseconds: 500));
+                                      },
+                                      child: ListView.builder(
+                                        itemCount: filtered.length,
+                                        itemBuilder: (_, i) => _GroupRoomTile(
+                                          room: filtered[i],
+                                          timeAgo:
+                                              _timeAgo(filtered[i].lastMessageAt),
+                                          selectionMode: _selectionMode,
+                                          isSelected: _selectedRoomIds
+                                              .contains(filtered[i].id),
+                                          isMuted: mutedRooms
+                                              .contains(filtered[i].id),
+                                          onTap: () {
+                                            if (_selectionMode) {
+                                              _toggleSelection(filtered[i].id);
+                                            } else {
+                                              currentOpenGroupRoomId =
+                                                  filtered[i].id;
+                                              context.push(
+                                                '/main/group/${filtered[i].id}',
+                                                extra: filtered[i],
+                                              ).then((_) {
+                                                currentOpenGroupRoomId = null;
+                                                ref.invalidate(
+                                                    mutedRoomsProvider);
+                                              });
+                                            }
+                                          },
+                                          onLongPress: () {
+                                            if (!_selectionMode) {
+                                              _enterSelectionMode(
+                                                  filtered[i].id);
+                                            }
+                                          },
+                                        ),
+                                      ),
+                                    ),
                             ),
-                          ),
+                          ],
                         );
                       },
                     ),
 
+                    // ─── 오픈채팅 탐색 ───
                     openRoomsAsync.when(
                       loading: () => const Center(
                         child: CircularProgressIndicator(
@@ -724,15 +851,13 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
                       ),
                       error: (e, _) => Center(
                         child: Text('오류: $e',
-                            style: TextStyle(
-                                color: AppTheme.textSub)),
+                            style: TextStyle(color: AppTheme.textSub)),
                       ),
                       data: (rooms) {
                         if (rooms.isEmpty) {
                           return Center(
                             child: Column(
-                              mainAxisAlignment:
-                                  MainAxisAlignment.center,
+                              mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 const Text('🌐',
                                     style: TextStyle(fontSize: 48)),
@@ -751,7 +876,8 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
                         return Column(
                           children: [
                             Padding(
-                              padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                              padding: const EdgeInsets.fromLTRB(
+                                  16, 12, 16, 8),
                               child: Container(
                                 decoration: BoxDecoration(
                                   color: AppTheme.bgCard,
@@ -896,8 +1022,7 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
                                             MainAxisAlignment.center,
                                         children: [
                                           const Text('🔍',
-                                              style: TextStyle(
-                                                  fontSize: 40)),
+                                              style: TextStyle(fontSize: 40)),
                                           const SizedBox(height: 12),
                                           Text(
                                             _openSearch.isNotEmpty
@@ -917,8 +1042,7 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
                                       onRefresh: () async {
                                         ref.invalidate(openRoomsProvider);
                                         await Future.delayed(
-                                            const Duration(
-                                                milliseconds: 500));
+                                            const Duration(milliseconds: 500));
                                       },
                                       child: ListView.builder(
                                         itemCount: filtered.length,
@@ -957,6 +1081,116 @@ class _GroupChatListScreenState extends ConsumerState<GroupChatListScreen>
   }
 }
 
+// ═══════════════════════════════════════════════════
+// ⭐⭐⭐ 내 채팅방 세그먼트 (전체 / 그룹 / 오픈)
+// ═══════════════════════════════════════════════════
+class _MyRoomSegment extends StatelessWidget {
+  final MyRoomFilter selected;
+  final int totalCount;
+  final int groupCount;
+  final int openCount;
+  final ValueChanged<MyRoomFilter> onChanged;
+
+  const _MyRoomSegment({
+    required this.selected,
+    required this.totalCount,
+    required this.groupCount,
+    required this.openCount,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.border),
+      ),
+      padding: const EdgeInsets.all(3),
+      child: Row(
+        children: [
+          _SegItem(
+              label: '전체',
+              count: totalCount,
+              selected: selected == MyRoomFilter.all,
+              onTap: () => onChanged(MyRoomFilter.all)),
+          _SegItem(
+              label: '그룹',
+              count: groupCount,
+              selected: selected == MyRoomFilter.group,
+              onTap: () => onChanged(MyRoomFilter.group)),
+          _SegItem(
+              label: '오픈',
+              count: openCount,
+              selected: selected == MyRoomFilter.open,
+              onTap: () => onChanged(MyRoomFilter.open)),
+        ],
+      ),
+    );
+  }
+}
+
+class _SegItem extends StatelessWidget {
+  final String label;
+  final int count;
+  final bool selected;
+  final VoidCallback onTap;
+  const _SegItem({
+    required this.label,
+    required this.count,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: selected ? AppTheme.primary : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          alignment: Alignment.center,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: selected ? Colors.white : AppTheme.textSub,
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                '$count',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: selected
+                      ? Colors.white.withOpacity(0.8)
+                      : AppTheme.textMuted,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// 그룹 룸 타일 (자물쇠 아이콘 추가)
+// ═══════════════════════════════════════════════════
 class _GroupRoomTile extends StatelessWidget {
   final GroupRoomModel room;
   final String timeAgo;
@@ -992,8 +1226,7 @@ class _GroupRoomTile extends StatelessWidget {
               : (isUnread
                   ? AppTheme.primary.withOpacity(0.08)
                   : Colors.transparent),
-          border: Border(
-              bottom: BorderSide(color: AppTheme.border)),
+          border: Border(bottom: BorderSide(color: AppTheme.border)),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
@@ -1002,20 +1235,15 @@ class _GroupRoomTile extends StatelessWidget {
               Container(
                 width: 22, height: 22,
                 decoration: BoxDecoration(
-                  color: isSelected
-                      ? AppTheme.primary
-                      : Colors.transparent,
+                  color: isSelected ? AppTheme.primary : Colors.transparent,
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: isSelected
-                        ? AppTheme.primary
-                        : AppTheme.border,
+                    color: isSelected ? AppTheme.primary : AppTheme.border,
                     width: 2,
                   ),
                 ),
                 child: isSelected
-                    ? const Icon(Icons.check,
-                        color: Colors.white, size: 14)
+                    ? const Icon(Icons.check, color: Colors.white, size: 14)
                     : null,
               ),
               const SizedBox(width: 12),
@@ -1024,9 +1252,7 @@ class _GroupRoomTile extends StatelessWidget {
             Stack(
               children: [
                 AvatarWidget(
-                    url: room.avatarUrl,
-                    name: room.name,
-                    size: 50),
+                    url: room.avatarUrl, name: room.name, size: 50),
                 if (room.isOpen)
                   Positioned(
                     bottom: 0, right: 0,
@@ -1035,8 +1261,7 @@ class _GroupRoomTile extends StatelessWidget {
                       decoration: BoxDecoration(
                         color: const Color(0xFF06B6D4),
                         shape: BoxShape.circle,
-                        border: Border.all(
-                            color: AppTheme.bg, width: 1.5),
+                        border: Border.all(color: AppTheme.bg, width: 1.5),
                       ),
                       child: const Icon(Icons.public,
                           color: Colors.white, size: 10),
@@ -1053,6 +1278,12 @@ class _GroupRoomTile extends StatelessWidget {
                 children: [
                   Row(
                     children: [
+                      // ⭐ 자물쇠 아이콘
+                      if (room.hasPassword) ...[
+                        Icon(Icons.lock,
+                            size: 12, color: AppTheme.primary),
+                        const SizedBox(width: 4),
+                      ],
                       Flexible(
                         child: Text(room.name,
                             style: TextStyle(
@@ -1067,8 +1298,7 @@ class _GroupRoomTile extends StatelessWidget {
                       const SizedBox(width: 4),
                       Text('${room.memberCount}',
                           style: TextStyle(
-                              fontSize: 11,
-                              color: AppTheme.textSub)),
+                              fontSize: 11, color: AppTheme.textSub)),
                       if (isMuted) ...[
                         const SizedBox(width: 4),
                         Icon(Icons.notifications_off,
@@ -1150,6 +1380,9 @@ class _GroupRoomTile extends StatelessWidget {
   }
 }
 
+// ═══════════════════════════════════════════════════
+// 오픈룸 타일 (자물쇠 아이콘 추가)
+// ═══════════════════════════════════════════════════
 class _OpenRoomTile extends StatelessWidget {
   final GroupRoomModel room;
   final String myId;
@@ -1184,9 +1417,7 @@ class _OpenRoomTile extends StatelessWidget {
                       : AppTheme.bgCard,
                   shape: BoxShape.circle,
                   border: Border.all(
-                    color: rank! <= 3
-                        ? AppTheme.primary
-                        : AppTheme.border,
+                    color: rank! <= 3 ? AppTheme.primary : AppTheme.border,
                   ),
                 ),
                 child: Center(
@@ -1213,6 +1444,12 @@ class _OpenRoomTile extends StatelessWidget {
                 children: [
                   Row(
                     children: [
+                      // ⭐ 자물쇠
+                      if (room.hasPassword) ...[
+                        Icon(Icons.lock,
+                            size: 12, color: AppTheme.primary),
+                        const SizedBox(width: 4),
+                      ],
                       Expanded(
                         child: Text(room.name,
                             style: TextStyle(
@@ -1245,8 +1482,7 @@ class _OpenRoomTile extends StatelessWidget {
                         Expanded(
                           child: Text(room.description!,
                               style: TextStyle(
-                                  fontSize: 12,
-                                  color: AppTheme.textSub),
+                                  fontSize: 12, color: AppTheme.textSub),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis),
                         )
@@ -1257,16 +1493,14 @@ class _OpenRoomTile extends StatelessWidget {
                       const SizedBox(width: 2),
                       Text('${room.memberCount}',
                           style: TextStyle(
-                              fontSize: 11,
-                              color: AppTheme.textSub)),
+                              fontSize: 11, color: AppTheme.textSub)),
                       const SizedBox(width: 8),
                       const Icon(Icons.favorite,
                           size: 11, color: Color(0xFFEF4444)),
                       const SizedBox(width: 2),
                       Text('${room.likeCount}',
                           style: TextStyle(
-                              fontSize: 11,
-                              color: AppTheme.textSub)),
+                              fontSize: 11, color: AppTheme.textSub)),
                     ],
                   ),
                 ],
@@ -1345,7 +1579,6 @@ class _GroupTopNotificationBannerState
 
   @override
   Widget build(BuildContext context) {
-    // ✨ RangeError 방어: 문자열 길이 체크
     final displayText = widget.content.length > 40
         ? '${widget.content.substring(0, 40)}...'
         : widget.content;
@@ -1405,8 +1638,7 @@ class _GroupTopNotificationBannerState
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
-                      crossAxisAlignment:
-                          CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Row(
@@ -1418,18 +1650,15 @@ class _GroupTopNotificationBannerState
                                       fontWeight: FontWeight.w800,
                                       fontSize: 14),
                                   maxLines: 1,
-                                  overflow:
-                                      TextOverflow.ellipsis),
+                                  overflow: TextOverflow.ellipsis),
                             ),
                             const SizedBox(width: 4),
                             Container(
                               padding: const EdgeInsets.symmetric(
                                   horizontal: 5, vertical: 1),
                               decoration: BoxDecoration(
-                                color: AppTheme.primary
-                                    .withOpacity(0.2),
-                                borderRadius:
-                                    BorderRadius.circular(4),
+                                color: AppTheme.primary.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(
                                 '그룹',
@@ -1446,8 +1675,7 @@ class _GroupTopNotificationBannerState
                         Text(
                           displayText,
                           style: TextStyle(
-                              color: AppTheme.textSub,
-                              fontSize: 13),
+                              color: AppTheme.textSub, fontSize: 13),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -1470,6 +1698,9 @@ class _GroupTopNotificationBannerState
   }
 }
 
+// ═══════════════════════════════════════════════════
+// 채팅방 만들기 시트 (비번 카드 추가)
+// ═══════════════════════════════════════════════════
 class _CreateGroupSheet extends ConsumerStatefulWidget {
   final String myId;
   const _CreateGroupSheet({required this.myId});
@@ -1485,12 +1716,15 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
   final _nameController = TextEditingController();
   final _descController = TextEditingController();
   final _tagController = TextEditingController();
+  final _passwordController = TextEditingController();              // ⭐ NEW
+  bool _passwordEnabled = false;                                    // ⭐ NEW
+
   String _roomType = 'group';
   String _category = '일반';
   bool _loading = false;
   List<String> _selectedFriendIds = [];
   List<String> _tags = [];
-  
+
   File? _imageFile;
 
   final _categories = ['일반', '게임', '공부', '취미', '운동', '음악', '여행', '기타'];
@@ -1511,6 +1745,7 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
     _nameController.dispose();
     _descController.dispose();
     _tagController.dispose();
+    _passwordController.dispose();                                  // ⭐ NEW
     super.dispose();
   }
 
@@ -1539,7 +1774,7 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
 
   Future<void> _pickImage() async {
     FocusScope.of(context).unfocus();
-    
+
     final picker = ImagePicker();
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
@@ -1607,6 +1842,19 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
 
   Future<void> _create() async {
     if (_nameController.text.trim().isEmpty) return;
+
+    // ⭐ 비번 검증
+    String? password;
+    if (_passwordEnabled) {
+      password = _passwordController.text.trim();
+      if (password.length < 4) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('비밀번호는 4자 이상으로 설정해주세요')),
+        );
+        return;
+      }
+    }
+
     FocusScope.of(context).unfocus();
     setState(() => _loading = true);
 
@@ -1616,15 +1864,16 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
     }
 
     final room = await createGroupRoom(
-      name:      _nameController.text.trim(),
-      roomType:  _roomType,
+      name:        _nameController.text.trim(),
+      roomType:    _roomType,
       description: _descController.text.trim().isEmpty
           ? null
           : _descController.text.trim(),
-      category:  _category,
-      memberIds: _selectedFriendIds,
-      avatarUrl: avatarUrl,
-      tags:      _roomType == 'open' ? _tags : [],
+      category:    _category,
+      memberIds:   _selectedFriendIds,
+      avatarUrl:   avatarUrl,
+      tags:        _roomType == 'open' ? _tags : [],
+      password:    password,                                      // ⭐ NEW
     );
 
     if (mounted) {
@@ -1633,6 +1882,10 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
       ref.invalidate(openRoomsProvider);
       if (room != null) {
         context.push('/main/group/${room.id}', extra: room);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('채팅방 생성에 실패했어요')),
+        );
       }
     }
   }
@@ -1649,8 +1902,8 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
         height: MediaQuery.of(context).size.height * 0.9,
         decoration: BoxDecoration(
           color: AppTheme.bgCard,
-          borderRadius: const
-              BorderRadius.vertical(top: Radius.circular(20)),
+          borderRadius:
+              const BorderRadius.vertical(top: Radius.circular(20)),
         ),
         child: Column(
           children: [
@@ -1678,7 +1931,8 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
                         : _create,
                     child: _loading
                         ? const SizedBox(
-                            width: 16, height: 16,
+                            width: 16,
+                            height: 16,
                             child: CircularProgressIndicator(
                                 strokeWidth: 2,
                                 color: AppTheme.primary))
@@ -1772,8 +2026,7 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
                           ? '대표 이미지 추가 (선택)'
                           : '이미지 변경',
                       style: TextStyle(
-                          fontSize: 12,
-                          color: AppTheme.textSub),
+                          fontSize: 12, color: AppTheme.textSub),
                     ),
                   ),
                   const SizedBox(height: 20),
@@ -1791,9 +2044,20 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
                     maxLength: 30,
                     decoration: InputDecoration(
                       hintText: '채팅방 이름을 입력해요',
-                      counterStyle: TextStyle(
-                          color: AppTheme.textSub, fontSize: 11),
+                      counterStyle:
+                          TextStyle(color: AppTheme.textSub, fontSize: 11),
                     ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ⭐⭐⭐ 비번 설정 카드 (그룹/오픈 둘 다 적용)
+                  PasswordSettingsCard(
+                    enabled: _passwordEnabled,
+                    controller: _passwordController,
+                    onToggle: (v) {
+                      setState(() => _passwordEnabled = v);
+                      if (!v) _passwordController.clear();
+                    },
                   ),
                   const SizedBox(height: 16),
 
@@ -1878,8 +2142,7 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
                         Expanded(
                           child: TextField(
                             controller: _tagController,
-                            style: TextStyle(
-                                color: AppTheme.textMain),
+                            style: TextStyle(color: AppTheme.textMain),
                             maxLength: 10,
                             onSubmitted: (_) => _addTag(),
                             decoration: InputDecoration(
@@ -1889,8 +2152,7 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
                                   color: AppTheme.primary,
                                   fontWeight: FontWeight.w700),
                               counterStyle: TextStyle(
-                                  color: AppTheme.textSub,
-                                  fontSize: 11),
+                                  color: AppTheme.textSub, fontSize: 11),
                             ),
                           ),
                         ),
@@ -1921,10 +2183,8 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
                               padding: const EdgeInsets.fromLTRB(
                                   10, 5, 6, 5),
                               decoration: BoxDecoration(
-                                color: AppTheme.primary
-                                    .withOpacity(0.12),
-                                borderRadius:
-                                    BorderRadius.circular(14),
+                                color: AppTheme.primary.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(14),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -1932,15 +2192,12 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet>
                                   Text('#$tag',
                                       style: const TextStyle(
                                           fontSize: 12,
-                                          color:
-                                              AppTheme.primaryLight,
-                                          fontWeight:
-                                              FontWeight.w600)),
+                                          color: AppTheme.primaryLight,
+                                          fontWeight: FontWeight.w600)),
                                   const SizedBox(width: 4),
                                   const Icon(Icons.close,
                                       size: 14,
-                                      color:
-                                          AppTheme.primaryLight),
+                                      color: AppTheme.primaryLight),
                                 ],
                               ),
                             ),

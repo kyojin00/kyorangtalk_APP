@@ -13,6 +13,9 @@
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29"/>
+    <!-- ⭐ gal 패키지 - EXIF 위치 메타데이터 보존용 -->
+    <uses-permission
+        android:name="android.permission.ACCESS_MEDIA_LOCATION"/>
     <!-- ✨ 음성 메시지 녹음용 -->
     <uses-permission
         android:name="android.permission.RECORD_AUDIO"/>
@@ -45,6 +48,34 @@
                     android:name="FLUTTER_NOTIFICATION_CLICK"/>
                 <category
                     android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+            <!-- ⭐⭐⭐ open.kyorang.com 통합 App Link -->
+            <!-- /join/CODE     → 채팅방 초대 -->
+            <!-- /verified      → 이메일 인증 완료 -->
+            <intent-filter
+                android:autoVerify="true">
+                <action
+                    android:name="android.intent.action.VIEW"/>
+                <category
+                    android:name="android.intent.category.DEFAULT"/>
+                <category
+                    android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="open.kyorang.com"/>
+                <data android:pathPrefix="/join"/>
+                <data android:pathPrefix="/verified"/>
+            </intent-filter>
+            <!-- ⭐ Custom scheme fallback (인앱 브라우저 등 예외 케이스용) -->
+            <!-- kyorangtalk://join/CODE -->
+            <!-- kyorangtalk://verified -->
+            <intent-filter>
+                <action
+                    android:name="android.intent.action.VIEW"/>
+                <category
+                    android:name="android.intent.category.DEFAULT"/>
+                <category
+                    android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="kyorangtalk" android:host="join"/>
+                <data android:scheme="kyorangtalk" android:host="verified"/>
             </intent-filter>
         </activity>
         <service

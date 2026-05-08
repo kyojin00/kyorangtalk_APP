@@ -13,6 +13,7 @@ import '../../group_chat/providers/group_chat_provider.dart';
 import '../../group_chat/screens/group_chat_room_screen.dart';
 import '../models/chat_room_model.dart';
 import '../providers/chat_provider.dart' as provider;
+import 'my_plans_screen.dart';                                 // ⭐ NEW
 
 class ChatListScreen extends ConsumerStatefulWidget {
   const ChatListScreen({super.key});
@@ -27,7 +28,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
   final _myId = Supabase.instance.client.auth.currentUser!.id;
   OverlayEntry? _overlayEntry;
   
-  // ✨ 시간 표시 자동 갱신용 타이머
   Timer? _uiRefreshTimer;
 
   @override
@@ -35,7 +35,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
     super.initState();
     _listenForIncomingMessages();
     
-    // ✨ 30초마다 UI 갱신 → "방금 → 1분 전 → 2분 전" 자동 업데이트
     _uiRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
@@ -60,7 +59,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
             if (provider.currentOpenRoomId == roomId) return;
 
             try {
-              // ✨ 1. 전역 알림 설정 확인 (Supabase 직접 조회)
               final prefsData = await Supabase.instance.client
                   .from('kyorangtalk_notification_prefs')
                   .select(
@@ -78,7 +76,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                 return;
               }
 
-              // ✨ 2. 개별 방 음소거 확인
               final muted =
                   await NotificationService.isMuted(roomId: roomId);
               if (muted) {
@@ -88,7 +85,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
 
               if (!mounted) return;
 
-              // ✨ 3. 차단 여부 확인
               final blockCheck = await Supabase.instance.client
                   .from('kyorangtalk_blocks')
                   .select('id')
@@ -103,7 +99,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
 
               if (!mounted) return;
 
-              // 프로필 조회 후 배너 표시
               final profile = await Supabase.instance.client
                   .from('kyorangtalk_profiles')
                   .select('nickname')
@@ -120,7 +115,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                   .firstOrNull;
 
               if (room != null) {
-                // ✨ 4. 메시지 미리보기 설정 반영
                 final displayContent = messagePreviewEnabled
                     ? content
                     : '새 메시지가 도착했어요';
@@ -174,27 +168,19 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
     super.dispose();
   }
 
-  // ✨ 시간 표시 함수 - UTC 기준 비교로 완전히 정확하게!
   String _timeAgo(DateTime dt) {
-    // UTC 기준으로 통일해서 비교 (시간대 문제 완전 방지)
     final nowUtc = DateTime.now().toUtc();
     final dtUtc = dt.isUtc ? dt : dt.toUtc();
     var diff = nowUtc.difference(dtUtc);
     
-    // 미래 시간 방어 (시계 차이/동기화 문제)
     if (diff.isNegative) {
       diff = Duration.zero;
     }
     
-    // 60초 미만 → "방금"
     if (diff.inSeconds < 60) return '방금';
-    // 1시간 미만 → "N분 전"
     if (diff.inMinutes < 60) return '${diff.inMinutes}분 전';
-    // 24시간 미만 → "N시간 전"
     if (diff.inHours < 24) return '${diff.inHours}시간 전';
-    // 7일 미만 → "N일 전"
     if (diff.inDays < 7) return '${diff.inDays}일 전';
-    // 그 이상 → "M/D" 날짜 표시
     final local = dt.isUtc ? dt.toLocal() : dt;
     return DateFormat('M/d').format(local);
   }
@@ -224,6 +210,16 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
             context.push('/main/chat/${room.roomId}', extra: room);
           }
         },
+      ),
+    );
+  }
+
+  // ⭐ NEW: 내 약속 페이지로 이동
+  void _openMyPlans() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const MyPlansScreen(),
       ),
     );
   }
@@ -276,6 +272,23 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                         ),
                       ],
                       const Spacer(),
+                      // ⭐ NEW: 약속 페이지 버튼
+                      GestureDetector(
+                        onTap: _openMyPlans,
+                        child: Container(
+                          padding: const EdgeInsets.all(8),
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            color: AppTheme.primary.withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Icon(
+                            Icons.event_note_outlined,
+                            color: AppTheme.primary,
+                            size: 20,
+                          ),
+                        ),
+                      ),
                       GestureDetector(
                         onTap: _showNewChatSheet,
                         child: Container(

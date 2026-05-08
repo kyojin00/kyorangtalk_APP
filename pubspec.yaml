@@ -1,7 +1,7 @@
 name: kyorang_talk
 description: 교랑톡 - 교랑 채팅 앱
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.0+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -40,7 +40,12 @@ dependencies:
   just_audio: ^0.10.5
   open_filex: ^4.4.0     # ⭐ 파일 열기
   http: ^1.2.0           # ⭐ 진행률 다운로드
-  
+  purchases_flutter: ^8.2.0  # ⭐ 추가
+  flutter_image_compress: ^2.3.0
+  gal: ^2.3.0
+  share_plus: ^10.0.0
+  app_links: ^6.3.0
+  html: ^0.15.4
 
 
 dev_dependencies:
@@ -48,32 +53,48 @@ dev_dependencies:
     sdk: flutter
   flutter_lints: ^3.0.0
   flutter_native_splash: ^2.3.10
+  flutter_launcher_icons: ^0.14.1   # ⭐ 추가
 
 flutter:
   uses-material-design: true
   assets:
     - assets/images/
+    - assets/icon/                  # ⭐ 추가
 
-
-flutter_native_splash:
-  # ═══ 그라데이션 배경 이미지 사용 ═══
-  background_image: "assets/images/splash_bg.png"
-  
-  # ═══ 중앙 로고 ═══
-  image: assets/images/logo.png
-  
-  # ═══ Android 12+ 전용 ═══
-  android_12:
-    image: assets/images/logo.png
-    color: "#080810"
-  
-  # ═══ 플랫폼 ═══
+# ═══════════════════════════════════════════════════
+# ⭐ 앱 아이콘 자동 생성 설정
+# ═══════════════════════════════════════════════════
+flutter_launcher_icons:
   android: true
-  ios: true
+  ios: false
+  image_path: "assets/icon/icon.png"
+  # 적응형 아이콘 (Android 8+)
+  adaptive_icon_background: "#2A0441"
+  adaptive_icon_foreground: "assets/icon/icon_foreground.png"
+  min_sdk_android: 21
+
+# ═══════════════════════════════════════════════════
+# ⭐ 스플래시 화면 (새 로고로 변경)
+# ═══════════════════════════════════════════════════
+flutter_native_splash:
+  # 배경색 - 검정
+  color: "#000000"
+
+  # 중앙 로고
+  image: assets/icon/splash.png
+
+  # Android 12+ 전용 (적응형 아이콘처럼 동작)
+  android_12:
+    color: "#000000"
+    image: assets/icon/splash_android12.png
+
+  # 플랫폼
+  android: true
+  ios: false
   web: false
-  
-  # ═══ 풀스크린 (상태바까지 배경색) ═══
+
+  # 풀스크린
   fullscreen: true
-  
-  # ═══ 가로 모드 비활성화 ═══
+
+  # 가로 모드 비활성화
   android_screen_orientation: portrait

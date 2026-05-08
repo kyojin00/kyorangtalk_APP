@@ -8,7 +8,9 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:go_router/go_router.dart';
 import 'core/config/supabase_config.dart';
 import 'core/notifications/fcm_service.dart';
+import 'core/services/deep_link_service.dart';                  // ⭐ NEW
 import 'features/chat/models/chat_room_model.dart';
+import 'features/chat/services/revenuecat_service.dart';
 import 'firebase_options.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
@@ -46,7 +48,38 @@ void main() async {
     realtimeClientOptions: const RealtimeClientOptions(eventsPerSecond: 40),
   );
 
-  // FCM 초기화 — 웹에서는 VAPID 키 없으면 실패하므로 안전하게
+  // ⭐ RevenueCat 초기화 (모바일에서만, 웹에서는 미지원)
+  if (!kIsWeb) {
+    try {
+      await RevenueCatService.initialize();
+
+      final currentUser = Supabase.instance.client.auth.currentUser;
+      if (currentUser != null) {
+        await RevenueCatService.login(currentUser.id);
+      }
+    } catch (e) {
+      print('RevenueCat 초기화 오류: $e');
+    }
+  }
+
+  // ⭐ Supabase 인증 상태 변화 감지 → RC 로그인/로그아웃 자동 동기화
+  if (!kIsWeb) {
+    Supabase.instance.client.auth.onAuthStateChange.listen((data) async {
+      final event = data.event;
+      final session = data.session;
+
+      if (event == AuthChangeEvent.signedIn && session?.user != null) {
+        await RevenueCatService.login(session!.user.id);
+      } else if (event == AuthChangeEvent.signedOut) {
+        await RevenueCatService.logout();
+      } else if (event == AuthChangeEvent.userUpdated &&
+          session?.user != null) {
+        await RevenueCatService.login(session!.user.id);
+      }
+    });
+  }
+
+  // FCM 초기화
   try {
     await FcmService.initialize();
     print('FCM 초기화 성공');
@@ -60,7 +93,6 @@ void main() async {
 
     final supabase = Supabase.instance.client;
 
-    // Supabase 연결 대기 (최대 3초)
     int retry = 0;
     while (supabase.auth.currentUser == null && retry < 6) {
       await Future.delayed(const Duration(milliseconds: 500));
@@ -79,6 +111,11 @@ void main() async {
   });
 
   runApp(const ProviderScope(child: KyorangTalkApp()));
+
+  // ⭐⭐⭐ 딥링크 서비스 시작 (앱 빌드 후)
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    DeepLinkService.instance.init(navigatorKey: navigatorKey);
+  });
 }
 
 Future<void> _navigateToChatRoom(String roomId, String senderId) async {
@@ -87,7 +124,6 @@ Future<void> _navigateToChatRoom(String roomId, String senderId) async {
   if (myId == null) return;
 
   try {
-    // room 정보 조회
     final roomData = await supabase
         .from('kyorangtalk_rooms')
         .select('*')
@@ -103,7 +139,6 @@ Future<void> _navigateToChatRoom(String roomId, String senderId) async {
         ? roomData['user2_id'] as String
         : roomData['user1_id'] as String;
 
-    // 파트너 프로필 조회
     final profile = await supabase
         .from('kyorangtalk_profiles')
         .select('id, nickname, avatar_url')
@@ -130,7 +165,6 @@ Future<void> _navigateToChatRoom(String roomId, String senderId) async {
       pinnedMessage:   roomData['pinned_message'] as String?,
     );
 
-    // context 대기 (최대 2초)
     int retry = 0;
     while (navigatorKey.currentContext == null && retry < 4) {
       await Future.delayed(const Duration(milliseconds: 500));
@@ -140,7 +174,6 @@ Future<void> _navigateToChatRoom(String roomId, String senderId) async {
     final context = navigatorKey.currentContext;
     if (context != null) {
       print('채팅방 이동: ${room.partnerName}');
-      // roomId 기반 라우팅으로 변경
       context.push('/main/chat/${room.roomId}', extra: room);
     } else {
       print('context 없음');

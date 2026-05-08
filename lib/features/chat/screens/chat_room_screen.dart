@@ -13,21 +13,31 @@ import '../../reports/widgets/report_dialog.dart';
 import '../models/chat_room_model.dart';
 import '../models/message_model.dart';
 import '../providers/chat_provider.dart';
-import 'image_viewer_screen.dart';
+import '../providers/reaction_provider.dart';
+import '../services/plan_service.dart';
+import '../services/pending_message_store.dart';
+import '../services/draft_store.dart';
+import 'multi_image_viewer_screen.dart';
+import 'room_gallery_screen.dart';
+import 'room_memory_screen.dart';
 import '../../profile/screens/user_profile_screen.dart';
 import '../services/audio_service.dart';
 import '../utils/file_helper.dart';
+import '../utils/multi_image_helper.dart';
 import '../widgets/voice_record_screen.dart';
 import '../widgets/attachment_menu.dart';
 import '../widgets/game_select_sheet.dart';
-// ✨ 분리된 위젯들
 import '../widgets/chat_message_bubble.dart';
 import '../widgets/chat_blocked_banner.dart';
 import '../widgets/chat_app_bar.dart';
 import '../widgets/chat_room_sheets.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/chat_pinned_reply.dart';
-// ✨ 투표
+import '../widgets/reaction_picker_bar.dart';
+import '../widgets/summary_banner.dart';
+import '../widgets/smart_reply_bar.dart';
+import '../widgets/plan_card_widget.dart';
+import '../widgets/failed_message_bubble.dart';
 import '../../polls/widgets/create_poll_sheet.dart';
 
 class ChatRoomScreen extends ConsumerStatefulWidget {
@@ -55,8 +65,17 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   String? _pinnedMessage;
   bool _isMuted = false;
   bool _disposed = false;
-  
-  // 🔒 스크롤 잠금 (투표 등 외부 요인으로 스크롤 안 변하게)
+  bool _summaryDismissed = false;
+
+  String? _smartReplyDismissedFor;
+  bool _inputIsEmpty = true;
+
+  final Map<String, PlanModel> _detectedPlans = <String, PlanModel>{};
+  final Set<String> _planExtractInProgress = <String>{};
+
+  bool _isPaginating = false;
+  bool _noMoreMessages = false;
+
   double? _lockedScrollPos;
   bool _scrollLocked = false;
 
@@ -70,6 +89,13 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   final Map<String, GlobalKey> _messageKeys = {};
   List<MessageModel>? _lastMessages;
   List<MessageGroup> _cachedGroups = [];
+
+  // ⭐ 실패한 메시지 (영구 저장)
+  List<PendingMessage> _failedMessages = [];
+  final Set<String> _retryingIds = <String>{};
+
+  // ⭐ Draft 자동 저장용 디바운서
+  Timer? _draftSaveDebouncer;
 
   bool get _isStatusLoaded =>
       _isBlocked != null &&
@@ -85,6 +111,10 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     _loadMuteStatus();
     _loadAllStatus();
     _listenBlockChanges();
+    _loadFailedMessages();
+    _loadDraft();
+
+    _inputController.addListener(_onInputChanged);
 
     _focusNode.addListener(() {
       if (_focusNode.hasFocus && _isNearBottom()) {
@@ -92,30 +122,115 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       }
     });
 
-    // 사용자 스크롤 감지 → 위로 올리면 잠금!
-    _scrollController.addListener(() {
-      if (!_scrollController.hasClients) return;
+    _scrollController.addListener(_handleScroll);
+  }
 
-      final pos = _scrollController.position.pixels;
-      final maxPos = _scrollController.position.maxScrollExtent;
-      final fromBottom = maxPos - pos;
+  void _onInputChanged() {
+    final text = _inputController.text;
+    final isEmpty = text.trim().isEmpty;
+    if (isEmpty != _inputIsEmpty) {
+      setState(() => _inputIsEmpty = isEmpty);
+    }
 
-      // 하단에서 100px 이상 떨어져 있으면 → 잠금!
-      if (fromBottom > 100) {
-        _lockedScrollPos = pos;
-        _scrollLocked = true;
-      } else {
-        _lockedScrollPos = null;
-        _scrollLocked = false;
-      }
+    _draftSaveDebouncer?.cancel();
+    _draftSaveDebouncer = Timer(const Duration(milliseconds: 500), () {
+      DraftStore.save(
+        roomId: widget.room.roomId,
+        isGroup: false,
+        text: text,
+      );
     });
+  }
+
+  Future<void> _loadDraft() async {
+    final draft = await DraftStore.load(
+      roomId: widget.room.roomId,
+      isGroup: false,
+    );
+    if (!_disposed && mounted && draft.isNotEmpty) {
+      _inputController.text = draft;
+      _inputController.selection = TextSelection.fromPosition(
+        TextPosition(offset: draft.length),
+      );
+      setState(() => _inputIsEmpty = draft.trim().isEmpty);
+    }
+  }
+
+  Future<void> _loadFailedMessages() async {
+    final messages = await PendingMessageStore.getForRoom(
+      roomId: widget.room.roomId,
+      isGroup: false,
+    );
+    if (!_disposed && mounted) {
+      setState(() => _failedMessages = messages);
+    }
+  }
+
+  void _handleScroll() {
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position.pixels;
+    final maxPos = _scrollController.position.maxScrollExtent;
+    final fromBottom = maxPos - pos;
+
+    if (fromBottom > 100) {
+      _lockedScrollPos = pos;
+      _scrollLocked = true;
+    } else {
+      _lockedScrollPos = null;
+      _scrollLocked = false;
+    }
+
+    if (pos < 200 && !_isPaginating && !_noMoreMessages) {
+      _triggerPagination();
+    }
+  }
+
+  Future<void> _triggerPagination() async {
+    if (_isPaginating || _noMoreMessages) return;
+    setState(() => _isPaginating = true);
+
+    final beforeMaxExtent = _scrollController.hasClients
+        ? _scrollController.position.maxScrollExtent
+        : 0.0;
+
+    final loaded = await loadOlderMessages(widget.room.roomId);
+
+    if (!_disposed && mounted) {
+      setState(() {
+        _isPaginating = false;
+        if (!loaded) _noMoreMessages = true;
+      });
+
+      if (loaded) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_disposed || !mounted) return;
+          if (!_scrollController.hasClients) return;
+          final afterMaxExtent =
+              _scrollController.position.maxScrollExtent;
+          final diff = afterMaxExtent - beforeMaxExtent;
+          if (diff > 0) {
+            _scrollController.jumpTo(
+              _scrollController.position.pixels + diff,
+            );
+          }
+        });
+      }
+    }
   }
 
   @override
   void dispose() {
     _disposed = true;
     currentOpenRoomId = null;
+    _draftSaveDebouncer?.cancel();
+    DraftStore.save(
+      roomId: widget.room.roomId,
+      isGroup: false,
+      text: _inputController.text,
+    );
+    _inputController.removeListener(_onInputChanged);
     _inputController.dispose();
+    _scrollController.removeListener(_handleScroll);
     _scrollController.dispose();
     _searchController.dispose();
     _focusNode.dispose();
@@ -124,10 +239,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     }
     super.dispose();
   }
-
-  // ═══════════════════════════════════════════════════
-  // 🎯 스크롤
-  // ═══════════════════════════════════════════════════
 
   bool _isNearBottom() {
     if (!_scrollController.hasClients) return true;
@@ -144,7 +255,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   void _forceScrollToBottom() {
     if (_initialScrolled) return;
     _initialScrolled = true;
-
     WidgetsBinding.instance.addPostFrameCallback((_) => _jumpToBottom());
     Future.delayed(const Duration(milliseconds: 100), () {
       if (!_disposed && mounted) _jumpToBottom();
@@ -169,10 +279,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       );
     });
   }
-
-  // ═══════════════════════════════════════════════════
-  // 📥 데이터 로드
-  // ═══════════════════════════════════════════════════
 
   Future<void> _loadAllStatus() async {
     try {
@@ -279,14 +385,69 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     } catch (_) {}
   }
 
-  // ═══════════════════════════════════════════════════
-  // 🤝 친구/차단
-  // ═══════════════════════════════════════════════════
+  Future<void> _tryExtractPlan(MessageModel msg) async {
+    if (_disposed) return;
+    if (msg.isDeleted) return;
+    if (msg.imageUrl != null ||
+        msg.isMultiImageMessage ||
+        msg.fileUrl != null ||
+        msg.gameData != null ||
+        msg.pollId != null) return;
+
+    final text = msg.audioUrl != null
+        ? (msg.audioTranscript ?? '')
+        : msg.content;
+    if (text.trim().length < 10) return;
+
+    if (_planExtractInProgress.contains(msg.id)) return;
+    if (_detectedPlans.containsKey(msg.id)) return;
+
+    _planExtractInProgress.add(msg.id);
+
+    try {
+      final cached = await PlanService.fetchByMessageId(msg.id);
+      if (cached != null) {
+        if (!_disposed && mounted && !cached.isDismissed) {
+          setState(() => _detectedPlans[msg.id] = cached);
+        }
+        return;
+      }
+
+      final senderName = msg.senderId == _myId ? '나' : widget.room.partnerName;
+      final plan = await PlanService.extractFromMessage(
+        roomId: widget.room.roomId,
+        isGroup: false,
+        messageId: msg.id,
+        messageText: text,
+        senderName: senderName,
+        context: _getRecentMessagesForContext(),
+      );
+
+      if (plan != null && !_disposed && mounted) {
+        setState(() => _detectedPlans[msg.id] = plan);
+      }
+    } finally {
+      _planExtractInProgress.remove(msg.id);
+    }
+  }
+
+  void _extractPlansForRecentMessages(List<MessageModel> messages) {
+    final sorted = [...messages]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final recent =
+        sorted.length > 30 ? sorted.sublist(sorted.length - 30) : sorted;
+
+    final cutoff = DateTime.now().subtract(const Duration(hours: 24));
+    final candidates = recent.where((m) => m.createdAt.isAfter(cutoff));
+
+    for (final msg in candidates) {
+      _tryExtractPlan(msg);
+    }
+  }
 
   Future<void> _sendFriendRequest() async {
     if (_friendRequestSending) return;
     setState(() => _friendRequestSending = true);
-
     try {
       await Supabase.instance.client.from('kyorangtalk_friends').insert({
         'requester_id': _myId,
@@ -314,7 +475,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     final ok =
         await showBlockConfirmDialog(context, widget.room.partnerName);
     if (!ok) return;
-
     try {
       final sb = Supabase.instance.client;
       await sb.from('kyorangtalk_blocks').insert({
@@ -326,7 +486,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           .delete()
           .or('and(requester_id.eq.$_myId,receiver_id.eq.${widget.room.partnerId}),'
               'and(requester_id.eq.${widget.room.partnerId},receiver_id.eq.$_myId)');
-
       if (!_disposed && mounted) {
         setState(() {
           _isBlocked = true;
@@ -345,7 +504,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     final ok =
         await showUnblockConfirmDialog(context, widget.room.partnerName);
     if (!ok) return;
-
     try {
       await Supabase.instance.client
           .from('kyorangtalk_blocks')
@@ -380,10 +538,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       senderNickname: widget.room.partnerName,
     );
   }
-
-  // ═══════════════════════════════════════════════════
-  // 🔍 검색
-  // ═══════════════════════════════════════════════════
 
   void _onSearch(String query, List<MessageModel> messages) {
     if (query.isEmpty) {
@@ -430,16 +584,70 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     return [...msgs]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
   }
 
-  // ═══════════════════════════════════════════════════
-  // 📎 첨부 메뉴
-  // ═══════════════════════════════════════════════════
+  List<String> _getRecentMessagesForContext() {
+    final msgs =
+        ref.read(messagesProvider(widget.room.roomId)).value ?? [];
+    final recent = msgs.reversed
+        .where((m) =>
+            !m.isDeleted &&
+            !m.isImageMessage &&
+            m.audioUrl == null &&
+            m.fileUrl == null &&
+            m.gameData == null &&
+            m.pollId == null &&
+            m.content.trim().isNotEmpty)
+        .take(5)
+        .toList()
+        .reversed
+        .toList();
+
+    return recent.map((m) {
+      final speaker =
+          m.senderId == _myId ? '나' : widget.room.partnerName;
+      return '$speaker: ${m.content}';
+    }).toList();
+  }
+
+  MessageModel? _getSmartReplyTargetMessage() {
+    if (!_inputIsEmpty) return null;
+
+    final msgs = ref.read(messagesProvider(widget.room.roomId)).value ?? [];
+    if (msgs.isEmpty) return null;
+
+    final sorted = [...msgs]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final last = sorted.last;
+
+    if (last.senderId == _myId) return null;
+    if (last.isDeleted) return null;
+    if (_smartReplyDismissedFor == last.id) return null;
+
+    final diff = DateTime.now().difference(last.createdAt);
+    if (diff.inMinutes >= 1) return null;
+
+    final hasText = last.audioUrl != null
+        ? (last.audioTranscript?.isNotEmpty ?? false)
+        : (!last.isImageMessage &&
+            last.fileUrl == null &&
+            last.gameData == null &&
+            last.pollId == null &&
+            last.content.trim().isNotEmpty);
+    if (!hasText) return null;
+
+    return last;
+  }
+
+  String _getSmartReplyText(MessageModel msg) {
+    if (msg.audioUrl != null && msg.audioTranscript != null) {
+      return msg.audioTranscript!;
+    }
+    return msg.content;
+  }
 
   Future<void> _handleAttachment() async {
     if (_isBlocked == true || _isBlockedByPartner == true) return;
-
     final action = await showAttachmentMenu(context);
     if (!mounted || action == null) return;
-
     switch (action) {
       case 'gallery': await _pickAndSendImage(ImageSource.gallery); break;
       case 'camera':  await _pickAndSendImage(ImageSource.camera);  break;
@@ -454,7 +662,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     if (!mounted) return;
     final gameData = await showGameSheet(context);
     if (gameData == null || !mounted) return;
-
     try {
       await sendMessage(
         myId: _myId,
@@ -487,7 +694,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       roomType: 'dm',
     );
     if (pollId == null || !mounted) return;
-
     try {
       await sendMessage(
         myId: _myId,
@@ -505,10 +711,8 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     if (!mounted) return;
     final picked = await pickFile(context);
     if (picked == null || !mounted) return;
-
     setState(() => _sending = true);
     _showUploadDialog(picked.name);
-
     try {
       final fileUrl = await uploadFile(
         file: picked.file,
@@ -577,9 +781,7 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     if (_isBlocked == true || _isBlockedByPartner == true) return;
     final result = await showVoiceRecordSheet(context);
     if (result == null) return;
-
     if (!_disposed && mounted) setState(() => _sending = true);
-
     try {
       final audioUrl = await uploadAudioFile(
         localPath: result.path,
@@ -604,76 +806,189 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     }
   }
 
+  // ═══════════════════════════════════════════════════
+  // ⭐ 메시지 전송 (톤 보정 제거됨)
+  // ═══════════════════════════════════════════════════
   Future<void> _send() async {
     final content = _inputController.text.trim();
     if (content.isEmpty || _sending) return;
     if (_isBlocked == true || _isBlockedByPartner == true) return;
 
-    _inputController.clear();
     final reply = _replyTo;
-    setState(() => _replyTo = null);
 
-    sendMessage(
-      myId: _myId,
+    final pending = PendingMessage(
+      id: PendingMessageStore.generateLocalId(),
       roomId: widget.room.roomId,
+      isGroup: false,
       content: content,
       replyToId: reply?.id,
       replyToContent: reply?.content,
-    ).catchError((e) {
-      if (!_disposed && mounted) _showSnack('전송 실패: $e');
-    });
-    _animateToBottom();
+      createdAt: DateTime.now(),
+    );
+
+    _inputController.clear();
+    setState(() => _replyTo = null);
+
+    DraftStore.clear(roomId: widget.room.roomId, isGroup: false);
+
+    try {
+      await sendMessage(
+        myId: _myId,
+        roomId: widget.room.roomId,
+        content: content,
+        replyToId: reply?.id,
+        replyToContent: reply?.content,
+      );
+      if (!_disposed && mounted) {
+        ref.invalidate(messagesProvider(widget.room.roomId));
+        ref.invalidate(chatRoomsProvider);
+      }
+      _animateToBottom();
+    } catch (e) {
+      if (_disposed) return;
+      final failed = pending.copyWith(errorMessage: e.toString());
+      await PendingMessageStore.upsert(failed);
+      if (mounted) {
+        setState(() => _failedMessages = [..._failedMessages, failed]);
+        _animateToBottom();
+      }
+    }
+  }
+
+  Future<void> _retryFailedMessage(PendingMessage msg) async {
+    if (_retryingIds.contains(msg.id)) return;
+    if (_isBlocked == true || _isBlockedByPartner == true) {
+      _showSnack('차단된 사용자에게는 메시지를 보낼 수 없어요');
+      return;
+    }
+
+    setState(() => _retryingIds.add(msg.id));
+
+    try {
+      await sendMessage(
+        myId: _myId,
+        roomId: msg.roomId,
+        content: msg.content,
+        replyToId: msg.replyToId,
+        replyToContent: msg.replyToContent,
+      );
+      await PendingMessageStore.remove(msg.id);
+      if (!_disposed && mounted) {
+        setState(() {
+          _failedMessages.removeWhere((m) => m.id == msg.id);
+          _retryingIds.remove(msg.id);
+        });
+        ref.invalidate(messagesProvider(widget.room.roomId));
+        ref.invalidate(chatRoomsProvider);
+        _animateToBottom();
+      }
+    } catch (e) {
+      if (_disposed) return;
+      final updated = msg.copyWith(
+        retryCount: msg.retryCount + 1,
+        errorMessage: e.toString(),
+      );
+      await PendingMessageStore.upsert(updated);
+      if (mounted) {
+        setState(() {
+          final idx = _failedMessages.indexWhere((m) => m.id == msg.id);
+          if (idx >= 0) _failedMessages[idx] = updated;
+          _retryingIds.remove(msg.id);
+        });
+        _showSnack('재전송에 실패했어요. 잠시 후 다시 시도해주세요');
+      }
+    }
+  }
+
+  Future<void> _cancelFailedMessage(PendingMessage msg) async {
+    await PendingMessageStore.remove(msg.id);
+    if (!_disposed && mounted) {
+      setState(() {
+        _failedMessages.removeWhere((m) => m.id == msg.id);
+        _retryingIds.remove(msg.id);
+      });
+    }
   }
 
   Future<void> _pickAndSendImage(ImageSource source) async {
     if (_isBlocked == true || _isBlockedByPartner == true) return;
 
-    final picked = await ImagePicker().pickImage(
-      source: source,
-      maxWidth: 1024,
-      maxHeight: 1024,
-      imageQuality: 80,
-    );
-    if (picked == null) return;
+    if (source == ImageSource.camera) {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.camera,
+        maxWidth: 2048,
+        maxHeight: 2048,
+        imageQuality: 90,
+      );
+      if (picked == null || !mounted) return;
+      setState(() => _sending = true);
+      try {
+        final file = File(picked.path);
+        final ext = picked.path.split('.').last;
+        final path =
+            'dm/${widget.room.roomId}/${DateTime.now().millisecondsSinceEpoch}.$ext';
+        await Supabase.instance.client.storage
+            .from('kyorangtalk')
+            .upload(path, file,
+                fileOptions: const FileOptions(upsert: true));
+        final url = Supabase.instance.client.storage
+            .from('kyorangtalk')
+            .getPublicUrl(path);
+        await sendMessage(
+          myId: _myId,
+          roomId: widget.room.roomId,
+          content: '[이미지]',
+          imageUrl: url,
+        );
+        if (!_disposed && mounted) {
+          ref.invalidate(messagesProvider(widget.room.roomId));
+          ref.invalidate(chatRoomsProvider);
+          setState(() => _sending = false);
+          _animateToBottom();
+        }
+      } catch (e) {
+        if (!_disposed && mounted) {
+          _showSnack('이미지 전송 실패: $e');
+          setState(() => _sending = false);
+        }
+      }
+      return;
+    }
 
-    setState(() => _sending = true);
+    final picked = await pickMultipleImagesFromGallery();
+    if (picked.isEmpty || !mounted) return;
+
+    final result = await showMultiImagePreview(
+      context: context,
+      initialImages: picked,
+    );
+    if (result == null || result.isEmpty || !mounted) return;
+
+    final urls = await uploadMultipleImagesWithProgress(
+      context: context,
+      files: result.files,
+      roomId: widget.room.roomId,
+      roomType: 'dm',
+      isOriginal: result.isOriginal,
+    );
+    if (urls == null || urls.isEmpty || !mounted) return;
 
     try {
-      final file = File(picked.path);
-      final ext = picked.path.split('.').last;
-      final path =
-          'dm/${widget.room.roomId}/${DateTime.now().millisecondsSinceEpoch}.$ext';
-
-      await Supabase.instance.client.storage
-          .from('kyorangtalk')
-          .upload(path, file,
-              fileOptions: const FileOptions(upsert: true));
-
-      final url = Supabase.instance.client.storage
-          .from('kyorangtalk')
-          .getPublicUrl(path);
-
-      sendMessage(
+      await sendMessage(
         myId: _myId,
         roomId: widget.room.roomId,
-        content: '[이미지]',
-        imageUrl: url,
+        content: urls.length == 1 ? '[이미지]' : '[이미지 ${urls.length}장]',
+        imageUrls: urls,
       );
       if (!_disposed && mounted) {
-        setState(() => _sending = false);
+        ref.invalidate(messagesProvider(widget.room.roomId));
+        ref.invalidate(chatRoomsProvider);
         _animateToBottom();
       }
     } catch (e) {
-      if (!_disposed && mounted) {
-        _showSnack('이미지 전송 실패: $e');
-        setState(() => _sending = false);
-      }
+      if (mounted) _showSnack('이미지 전송 실패: $e');
     }
   }
-
-  // ═══════════════════════════════════════════════════
-  // 💬 메시지 액션
-  // ═══════════════════════════════════════════════════
 
   Future<void> _deleteMessage(String messageId) async {
     await Supabase.instance.client
@@ -714,7 +1029,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   Future<void> _handleMute() async {
     final result = await showMuteOptionsSheet(context, isMuted: _isMuted);
     if (result == null || _disposed || !mounted) return;
-
     if (result == 'unmute') {
       await NotificationService.unmute(roomId: widget.room.roomId);
       if (!_disposed && mounted) {
@@ -748,19 +1062,113 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   }
 
   void _handleMessageOptions(MessageModel msg) {
-    showMessageOptionsSheet(
-      context,
-      msg: msg,
-      isMe: msg.senderId == _myId,
-      isAnyBlocked: _isBlocked == true || _isBlockedByPartner == true,
-      onReply: () {
-        setState(() => _replyTo = msg);
-        _focusNode.requestFocus();
-      },
-      onCopy: () => _copyMessage(msg.content),
-      onPin: () => _pinMessage(msg.content),
-      onReport: () => _reportMessage(msg),
-      onDelete: () => _deleteMessage(msg.id),
+    final isMe = msg.senderId == _myId;
+    final isAnyBlocked = _isBlocked == true || _isBlockedByPartner == true;
+    final isSpecial = msg.isImageMessage ||
+        msg.audioUrl != null ||
+        msg.gameData != null ||
+        msg.pollId != null ||
+        msg.fileUrl != null;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.bgCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(
+                color: AppTheme.border,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+
+            if (!isAnyBlocked && !msg.isDeleted)
+              ReactionPickerBar(
+                onSelected: (emoji) {
+                  Navigator.pop(sheetCtx);
+                  toggleReaction(
+                    messageId: msg.id,
+                    roomId: widget.room.roomId,
+                    emoji: emoji,
+                    isGroup: false,
+                  );
+                },
+              ),
+
+            if (!isAnyBlocked && !msg.isDeleted)
+              ListTile(
+                leading: Icon(Icons.reply_rounded, color: AppTheme.textMain),
+                title: Text('답장',
+                    style: TextStyle(color: AppTheme.textMain)),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  setState(() => _replyTo = msg);
+                  _focusNode.requestFocus();
+                },
+              ),
+
+            if (!isSpecial && !msg.isDeleted)
+              ListTile(
+                leading:
+                    Icon(Icons.copy_outlined, color: AppTheme.textMain),
+                title: Text('복사',
+                    style: TextStyle(color: AppTheme.textMain)),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _copyMessage(msg.content);
+                },
+              ),
+
+            if (!isSpecial && !msg.isDeleted)
+              ListTile(
+                leading: Icon(Icons.push_pin_outlined,
+                    color: AppTheme.textMain),
+                title: Text('고정',
+                    style: TextStyle(color: AppTheme.textMain)),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _pinMessage(msg.content);
+                },
+              ),
+
+            if (!isMe && !msg.isDeleted)
+              ListTile(
+                leading: const Icon(Icons.flag_outlined,
+                    color: Color(0xFFFBBF24)),
+                title: Text('신고',
+                    style: TextStyle(color: AppTheme.textMain)),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _reportMessage(msg);
+                },
+              ),
+
+            if (isMe && !msg.isDeleted)
+              ListTile(
+                leading: const Icon(Icons.delete_outline,
+                    color: Color(0xFFEF4444)),
+                title: const Text('삭제',
+                    style: TextStyle(
+                        color: Color(0xFFEF4444),
+                        fontWeight: FontWeight.w600)),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _deleteMessage(msg.id);
+                },
+              ),
+
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
     );
   }
 
@@ -793,10 +1201,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     );
   }
 
-  // ═══════════════════════════════════════════════════
-  // 🕒 포맷
-  // ═══════════════════════════════════════════════════
-
   String _timeStr(DateTime dt) {
     final local = dt.isUtc ? dt.toLocal() : dt;
     final ampm = local.hour < 12 ? '오전' : '오후';
@@ -821,13 +1225,11 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
         identical(_lastMessages!.last, messages.last)) {
       return _cachedGroups;
     }
-
     final sorted = [...messages]
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
     final groups = <MessageGroup>[];
     String? currentLabel;
     List<MessageModel> currentItems = [];
-
     for (final msg in sorted) {
       final label = _dateLabel(msg.createdAt);
       if (label != currentLabel) {
@@ -843,7 +1245,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     if (currentItems.isNotEmpty) {
       groups.add(MessageGroup(currentLabel!, currentItems));
     }
-
     _lastMessages = messages;
     _cachedGroups = groups;
     return groups;
@@ -853,47 +1254,51 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     return _messageKeys.putIfAbsent(id, () => GlobalKey());
   }
 
-  // ═══════════════════════════════════════════════════
-  // 🏗️ Build
-  // ═══════════════════════════════════════════════════
-
   @override
   Widget build(BuildContext context) {
     final msgsAsync = ref.watch(messagesProvider(widget.room.roomId));
 
-    // 메시지 변경 감지: ID 비교로 진짜 새 메시지만!
     ref.listen(messagesProvider(widget.room.roomId), (prev, next) {
       if (_disposed) return;
       next.whenData((msgs) {
         if (_disposed) return;
-
         if (prev?.value == null) {
           _forceScrollToBottom();
+          _extractPlansForRecentMessages(msgs);
           return;
         }
-
         final prevIds = prev!.value!.map((m) => m.id).toSet();
         final newMessages =
             msgs.where((m) => !prevIds.contains(m.id)).toList();
-
         if (newMessages.isNotEmpty) {
-          final lastMsg = newMessages.last;
-          final isMyMessage = lastMsg.senderId == _myId;
+          final sortedNew = [...newMessages]
+            ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+          final latestNew = sortedNew.last;
+          final allSorted = [...msgs]
+            ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+          final isAtBottom = allSorted.last.id == latestNew.id;
 
-          if (isMyMessage || _isNearBottom()) {
-            Future.delayed(const Duration(milliseconds: 300), () {
-              if (!_disposed && mounted) _animateToBottom();
-            });
+          if (isAtBottom) {
+            final isMyMessage = latestNew.senderId == _myId;
+            if (isMyMessage || _isNearBottom()) {
+              Future.delayed(const Duration(milliseconds: 300), () {
+                if (!_disposed && mounted) _animateToBottom();
+              });
+            }
           }
-
           final unread =
               msgs.where((m) => m.senderId != _myId && !m.isRead).toList();
           if (unread.isNotEmpty) _markAllRead();
+
+          for (final msg in newMessages) {
+            _tryExtractPlan(msg);
+          }
         }
       });
     });
 
     final isAnyBlocked = _isBlocked == true || _isBlockedByPartner == true;
+    final smartReplyTarget = _getSmartReplyTargetMessage();
 
     return Scaffold(
       backgroundColor: AppTheme.bg,
@@ -907,6 +1312,15 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
               PinnedMessageBanner(
                 pinnedMessage: _pinnedMessage!,
                 onUnpin: _unpinMessage,
+              ),
+
+            if (!_summaryDismissed)
+              SummaryBanner(
+                roomId: widget.room.roomId,
+                isGroup: false,
+                unreadCount: widget.room.unreadCount,
+                onDismiss: () =>
+                    setState(() => _summaryDismissed = true),
               ),
 
             Expanded(
@@ -944,7 +1358,31 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
                   partnerName: widget.room.partnerName,
                   onUnblock: _isBlocked == true ? _unblockUser : null,
                 )
-              else
+              else ...[
+                if (smartReplyTarget != null)
+                  SmartReplyBar(
+                    key: ValueKey('smart_reply_${smartReplyTarget.id}'),
+                    roomId: widget.room.roomId,
+                    isGroup: false,
+                    lastMessageId: smartReplyTarget.id,
+                    lastMessageText: _getSmartReplyText(smartReplyTarget),
+                    senderName: widget.room.partnerName,
+                    contextMessages: _getRecentMessagesForContext(),
+                    onSelected: (text) {
+                      _inputController.text = text;
+                      _inputController.selection =
+                          TextSelection.fromPosition(
+                        TextPosition(offset: text.length),
+                      );
+                      _focusNode.requestFocus();
+                      setState(() =>
+                          _smartReplyDismissedFor = smartReplyTarget.id);
+                    },
+                    onDismiss: () {
+                      setState(() =>
+                          _smartReplyDismissedFor = smartReplyTarget.id);
+                    },
+                  ),
                 ChatInputBar(
                   controller: _inputController,
                   focusNode: _focusNode,
@@ -953,6 +1391,7 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
                   onAttachment: _handleAttachment,
                   onSend: _send,
                 ),
+              ],
           ],
         ),
       ),
@@ -982,6 +1421,36 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
         onBlock: _blockUser,
         onReport: _reportUser,
         onNotFriendTap: _handleNotFriendTap,
+        onGallery: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => RoomGalleryScreen(
+                roomId: widget.room.roomId,
+                isGroup: false,
+                roomName: widget.room.partnerName,
+                myId: _myId,
+                partnerId: widget.room.partnerId,
+                partnerName: widget.room.partnerName,
+              ),
+            ),
+          );
+        },
+        onMemory: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => RoomMemoryScreen(
+                roomId: widget.room.roomId,
+                isGroup: false,
+                roomName: widget.room.partnerName,
+                myId: _myId,
+                partnerId: widget.room.partnerId,
+                partnerName: widget.room.partnerName,
+              ),
+            ),
+          );
+        },
       );
 
   PreferredSizeWidget _buildSearchBar() {
@@ -1022,7 +1491,7 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   }
 
   Widget _buildMessageList(List<MessageModel> messages) {
-    if (messages.isEmpty) {
+    if (messages.isEmpty && _failedMessages.isEmpty) {
       return EmptyChatState(partnerName: widget.room.partnerName);
     }
 
@@ -1035,23 +1504,34 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       });
     }
 
-    final items = <MessageListItem>[];
+    final items = <_ListItem>[];
+    if (_isPaginating) {
+      items.add(_ListItem.loadingIndicator());
+    } else if (_noMoreMessages) {
+      items.add(_ListItem.startOfChatMarker());
+    }
+
     for (final group in groups) {
-      items.add(MessageListItem.dateDivider(group.label));
+      items.add(_ListItem.dateDivider(group.label));
       for (final msg in group.items) {
-        items.add(MessageListItem.message(msg));
+        items.add(_ListItem.message(msg));
       }
     }
 
-    // 🔒 매 빌드마다 스크롤 잠금 위치 강제 복구!
+    if (_failedMessages.isNotEmpty) {
+      final sortedFailed = [..._failedMessages]
+        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      for (final f in sortedFailed) {
+        items.add(_ListItem.failedMessage(f));
+      }
+    }
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_disposed || !mounted) return;
       if (!_scrollController.hasClients) return;
-
       if (_scrollLocked && _lockedScrollPos != null) {
         final currentPos = _scrollController.position.pixels;
         final diff = (currentPos - _lockedScrollPos!).abs();
-
         if (diff > 5) {
           _scrollController.jumpTo(_lockedScrollPos!);
         }
@@ -1068,8 +1548,53 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       itemBuilder: (ctx, index) {
         final item = items[index];
 
+        if (item.isLoadingIndicator) {
+          return const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Center(
+              child: SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppTheme.primary,
+                ),
+              ),
+            ),
+          );
+        }
+
+        if (item.isStartOfChatMarker) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            child: Center(
+              child: Text(
+                '대화의 시작이에요',
+                style: TextStyle(
+                  color: AppTheme.textMuted,
+                  fontSize: 11,
+                ),
+              ),
+            ),
+          );
+        }
+
         if (item.isDivider) {
           return DateDivider(label: item.dateLabel!);
+        }
+
+        if (item.isFailedMessage) {
+          final f = item.failedMessage!;
+          return RepaintBoundary(
+            key: ValueKey('failed_${f.id}'),
+            child: FailedMessageBubble(
+              message: f,
+              timeStr: _timeStr(f.createdAt),
+              isRetrying: _retryingIds.contains(f.id),
+              onRetry: () => _retryFailedMessage(f),
+              onCancel: () => _cancelFailedMessage(f),
+            ),
+          );
         }
 
         final msg = item.message!;
@@ -1080,40 +1605,125 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
                 .toLowerCase()
                 .contains(_searchQuery.toLowerCase());
 
+        final detectedPlan = _detectedPlans[msg.id];
+
         return RepaintBoundary(
           key: ValueKey('msg_${msg.id}'),
-          child: GestureDetector(
-            key: _getKeyFor(msg.id),
-            onLongPress: () => _handleMessageOptions(msg),
-            child: MessageBubble(
-              msg: msg,
-              isMe: isMe,
-              timeStr: _timeStr(msg.createdAt),
-              isHighlighted: isHighlighted,
-              searchQuery: _searchQuery,
-              partnerName: widget.room.partnerName,
-              partnerAvatar: widget.room.partnerAvatar,
-              onImageLoad: () {
-                if (_disposed) return;
-                if (_isNearBottom()) _jumpToBottom();
-              },
-              onImageTap: (url) {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ImageViewerScreen(
-                      imageUrl: url,
-                      senderName: isMe ? '나' : widget.room.partnerName,
-                      time: _timeStr(msg.createdAt),
-                    ),
+          child: Column(
+            crossAxisAlignment: isMe
+                ? CrossAxisAlignment.end
+                : CrossAxisAlignment.start,
+            children: [
+              GestureDetector(
+                key: _getKeyFor(msg.id),
+                onLongPress: () => _handleMessageOptions(msg),
+                child: MessageBubble(
+                  msg: msg,
+                  roomId: widget.room.roomId,
+                  isMe: isMe,
+                  timeStr: _timeStr(msg.createdAt),
+                  isHighlighted: isHighlighted,
+                  searchQuery: _searchQuery,
+                  partnerName: widget.room.partnerName,
+                  partnerAvatar: widget.room.partnerAvatar,
+                  onImageLoad: () {
+                    if (_disposed) return;
+                    if (_isNearBottom()) _jumpToBottom();
+                  },
+                  onImageTap: (url) {
+                    final allUrls = msg.allImageUrls;
+                    final initialIndex =
+                        allUrls.indexOf(url).clamp(0, allUrls.length - 1);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => MultiImageViewerScreen(
+                          imageUrls: allUrls.isEmpty ? [url] : allUrls,
+                          initialIndex: initialIndex < 0 ? 0 : initialIndex,
+                          senderName: isMe ? '나' : widget.room.partnerName,
+                          time: _timeStr(msg.createdAt),
+                        ),
+                      ),
+                    );
+                  },
+                  onAvatarTap: isMe ? null : _openPartnerProfile,
+                ),
+              ),
+
+              if (detectedPlan != null) ...[
+                const SizedBox(height: 4),
+                Padding(
+                  padding: EdgeInsets.only(
+                    left: isMe ? 40 : 36,
+                    right: isMe ? 4 : 40,
+                    bottom: 4,
                   ),
-                );
-              },
-              onAvatarTap: isMe ? null : _openPartnerProfile,
-            ),
+                  child: PlanCard(
+                    plan: detectedPlan,
+                    onDismissed: () {
+                      if (!_disposed && mounted) {
+                        setState(() => _detectedPlans.remove(msg.id));
+                      }
+                    },
+                    onUpdated: (updated) {
+                      if (!_disposed && mounted) {
+                        setState(() => _detectedPlans[msg.id] = updated);
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ],
           ),
         );
       },
     );
   }
+}
+
+class _ListItem {
+  final String? dateLabel;
+  final MessageModel? message;
+  final PendingMessage? failedMessage;
+  final bool isLoadingIndicator;
+  final bool isStartOfChatMarker;
+
+  _ListItem.dateDivider(this.dateLabel)
+      : message = null,
+        failedMessage = null,
+        isLoadingIndicator = false,
+        isStartOfChatMarker = false;
+
+  _ListItem.message(this.message)
+      : dateLabel = null,
+        failedMessage = null,
+        isLoadingIndicator = false,
+        isStartOfChatMarker = false;
+
+  _ListItem.failedMessage(this.failedMessage)
+      : dateLabel = null,
+        message = null,
+        isLoadingIndicator = false,
+        isStartOfChatMarker = false;
+
+  _ListItem.loadingIndicator()
+      : dateLabel = null,
+        message = null,
+        failedMessage = null,
+        isLoadingIndicator = true,
+        isStartOfChatMarker = false;
+
+  _ListItem.startOfChatMarker()
+      : dateLabel = null,
+        message = null,
+        failedMessage = null,
+        isLoadingIndicator = false,
+        isStartOfChatMarker = true;
+
+  bool get isDivider =>
+      dateLabel != null &&
+      !isLoadingIndicator &&
+      !isStartOfChatMarker;
+
+  bool get isFailedMessage => failedMessage != null;
 }

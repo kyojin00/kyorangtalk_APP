@@ -7,6 +7,7 @@ import '../../../core/notifications/notification_service.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../models/group_room_model.dart';
 import '../providers/group_chat_provider.dart';
+import '../widgets/password_dialog.dart';                       // ⭐ NEW
 import 'group_members_screen.dart';
 
 class GroupRoomInfoScreen extends ConsumerStatefulWidget {
@@ -88,24 +89,21 @@ class _GroupRoomInfoScreenState
               )
             else ...[
               ListTile(
-                leading: Icon(
-                    Icons.notifications_off_outlined,
+                leading: Icon(Icons.notifications_off_outlined,
                     color: AppTheme.textMain),
                 title: Text('1시간 동안 알림 끄기',
                     style: TextStyle(color: AppTheme.textMain)),
                 onTap: () => Navigator.pop(ctx, '1h'),
               ),
               ListTile(
-                leading: Icon(
-                    Icons.notifications_off_outlined,
+                leading: Icon(Icons.notifications_off_outlined,
                     color: AppTheme.textMain),
                 title: Text('8시간 동안 알림 끄기',
                     style: TextStyle(color: AppTheme.textMain)),
                 onTap: () => Navigator.pop(ctx, '8h'),
               ),
               ListTile(
-                leading: Icon(
-                    Icons.notifications_off_outlined,
+                leading: Icon(Icons.notifications_off_outlined,
                     color: AppTheme.textMain),
                 title: Text('24시간 동안 알림 끄기',
                     style: TextStyle(color: AppTheme.textMain)),
@@ -187,16 +185,12 @@ class _GroupRoomInfoScreenState
             style: TextStyle(
                 color: AppTheme.textMain,
                 fontWeight: FontWeight.w700)),
-        content: Text(
-          '채팅방을 나가면 대화 내용을 볼 수 없어요.',
-          style: TextStyle(
-              color: AppTheme.textSub, fontSize: 14),
-        ),
+        content: Text('채팅방을 나가면 대화 내용을 볼 수 없어요.',
+            style: TextStyle(color: AppTheme.textSub, fontSize: 14)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: Text('취소',
-                style: TextStyle(color: AppTheme.textSub)),
+            child: Text('취소', style: TextStyle(color: AppTheme.textSub)),
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
@@ -214,19 +208,75 @@ class _GroupRoomInfoScreenState
     await leaveGroupRoom(widget.room.id);
     if (mounted) {
       ref.invalidate(groupRoomsProvider);
-      Navigator.pop(context); // 정보 화면 닫기
-      Navigator.pop(context); // 채팅방 닫기
+      Navigator.pop(context);
+      Navigator.pop(context);
     }
   }
 
-  void _copyInviteCode() {
-    Clipboard.setData(ClipboardData(text: widget.room.inviteCode));
-    _showSnack('초대코드가 복사됐어요!');
+  // ⭐⭐⭐ 비밀번호 관리 (방장 전용)
+  Future<void> _managePassword() async {
+    final detail = ref.read(roomDetailProvider(widget.room.id)).value;
+    final hasPassword = detail?.hasPassword ?? widget.room.hasPassword;
+
+    final newPw = await showChangePasswordDialog(
+      context,
+      hasPassword: hasPassword,
+    );
+    if (newPw == null || !mounted) return;
+
+    final result = await updateRoomPassword(
+      roomId: widget.room.id,
+      newPassword: newPw.isEmpty ? null : newPw,
+    );
+
+    if (!mounted) return;
+
+    switch (result) {
+      case PasswordUpdateResult.updated:
+        _showSnack(hasPassword
+            ? '비밀번호가 변경됐어요'
+            : '비밀번호가 설정됐어요');
+        ref.invalidate(roomDetailProvider(widget.room.id));
+        ref.invalidate(groupRoomsProvider);
+        ref.invalidate(openRoomsProvider);
+        break;
+      case PasswordUpdateResult.removed:
+        _showSnack('비밀번호가 제거됐어요');
+        ref.invalidate(roomDetailProvider(widget.room.id));
+        ref.invalidate(groupRoomsProvider);
+        ref.invalidate(openRoomsProvider);
+        break;
+      case PasswordUpdateResult.notAdmin:
+        _showSnack('방장만 변경할 수 있어요');
+        break;
+      default:
+        _showSnack('변경에 실패했어요');
+    }
+  }
+
+  // ⭐⭐⭐ 초대 공유
+  void _shareInvite() {
+    final detail = ref.read(roomDetailProvider(widget.room.id)).value;
+    final hasPassword = detail?.hasPassword ?? widget.room.hasPassword;
+
+    showInviteShareSheet(
+      context,
+      roomName: widget.room.name,
+      inviteCode: widget.room.inviteCode,
+      hasPassword: hasPassword,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final room = widget.room;
+
+    // ⭐ 실시간으로 최신 방 정보 (비번 보호 여부 포함)를 받아옴
+    final detailAsync = ref.watch(roomDetailProvider(room.id));
+    final hasPassword =
+        detailAsync.value?.hasPassword ?? room.hasPassword;
+    // myRole은 widget.room으로부터 (변경 안됨)
+    final isAdmin = room.isAdmin;
 
     return Scaffold(
       backgroundColor: AppTheme.bg,
@@ -250,7 +300,7 @@ class _GroupRoomInfoScreenState
       body: SingleChildScrollView(
         child: Column(
           children: [
-            // ✨ 상단 이미지 + 그라데이션 + 방 이름
+            // ─── 상단 이미지 ───
             Stack(
               children: [
                 Container(
@@ -290,10 +340,11 @@ class _GroupRoomInfoScreenState
                     ),
                   ),
                 ),
-                // 상단 배지 (오픈채팅/그룹채팅 + 카테고리)
                 Positioned(
-                  top: 80, left: 20,
-                  child: Row(
+                  top: 80, left: 20, right: 20,
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
                     children: [
                       Container(
                         padding: const EdgeInsets.symmetric(
@@ -325,9 +376,30 @@ class _GroupRoomInfoScreenState
                           ],
                         ),
                       ),
-                      // 음소거 배지
-                      if (_isMuted) ...[
-                        const SizedBox(width: 6),
+                      // ⭐ 비번 보호 배지
+                      if (hasPassword)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFBBF24),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.lock,
+                                  color: Colors.white, size: 12),
+                              SizedBox(width: 4),
+                              Text('비밀번호',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w700)),
+                            ],
+                          ),
+                        ),
+                      if (_isMuted)
                         Container(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 5),
@@ -349,11 +421,9 @@ class _GroupRoomInfoScreenState
                             ],
                           ),
                         ),
-                      ],
                     ],
                   ),
                 ),
-                // 하단 방 이름
                 Positioned(
                   bottom: 20, left: 20, right: 20,
                   child: Text(
@@ -380,7 +450,6 @@ class _GroupRoomInfoScreenState
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // ✨ 통계 카드
                   Row(
                     children: [
                       Expanded(
@@ -404,7 +473,6 @@ class _GroupRoomInfoScreenState
                   ),
                   const SizedBox(height: 24),
 
-                  // ✨ 태그 (있으면 표시)
                   if (room.tags.isNotEmpty) ...[
                     Text('태그',
                         style: TextStyle(
@@ -419,10 +487,8 @@ class _GroupRoomInfoScreenState
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 5),
                           decoration: BoxDecoration(
-                            color: AppTheme.primary
-                                .withOpacity(0.12),
-                            borderRadius:
-                                BorderRadius.circular(14),
+                            color: AppTheme.primary.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(14),
                           ),
                           child: Text('#$tag',
                               style: const TextStyle(
@@ -435,7 +501,6 @@ class _GroupRoomInfoScreenState
                     const SizedBox(height: 24),
                   ],
 
-                  // ✨ 소개
                   Text('소개',
                       style: TextStyle(
                           fontSize: 13,
@@ -456,8 +521,7 @@ class _GroupRoomInfoScreenState
                           : '아직 소개가 없어요',
                       style: TextStyle(
                           fontSize: 14,
-                          color: room.description?.isNotEmpty ==
-                                  true
+                          color: room.description?.isNotEmpty == true
                               ? AppTheme.textMain
                               : AppTheme.textMuted,
                           height: 1.6),
@@ -465,7 +529,7 @@ class _GroupRoomInfoScreenState
                   ),
                   const SizedBox(height: 24),
 
-                  // ✨ 메뉴 리스트 (멤버, 알림, 초대코드)
+                  // ─── 관리 메뉴 ───
                   Text('관리',
                       style: TextStyle(
                           fontSize: 13,
@@ -473,7 +537,6 @@ class _GroupRoomInfoScreenState
                           color: AppTheme.textSub)),
                   const SizedBox(height: 10),
 
-                  // 멤버 목록
                   _MenuItem(
                     icon: Icons.people_outline,
                     iconColor: AppTheme.primary,
@@ -483,8 +546,7 @@ class _GroupRoomInfoScreenState
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) =>
-                              GroupMembersScreen(room: room),
+                          builder: (_) => GroupMembersScreen(room: room),
                         ),
                       );
                     },
@@ -492,7 +554,6 @@ class _GroupRoomInfoScreenState
 
                   const SizedBox(height: 10),
 
-                  // ✨ 알림 설정 (추가!)
                   _MenuItem(
                     icon: _isMuted
                         ? Icons.notifications_off_outlined
@@ -511,8 +572,7 @@ class _GroupRoomInfoScreenState
                             decoration: BoxDecoration(
                               color: const Color(0xFFEF4444)
                                   .withOpacity(0.15),
-                              borderRadius:
-                                  BorderRadius.circular(6),
+                              borderRadius: BorderRadius.circular(6),
                             ),
                             child: const Text('꺼짐',
                                 style: TextStyle(
@@ -524,33 +584,64 @@ class _GroupRoomInfoScreenState
                     onTap: _loadingMute ? null : _showMuteOptions,
                   ),
 
-                  // 초대코드 (있으면)
+                  // ⭐⭐⭐ 비밀번호 관리 (방장 전용)
+                  if (isAdmin) ...[
+                    const SizedBox(height: 10),
+                    _MenuItem(
+                      icon: hasPassword
+                          ? Icons.lock
+                          : Icons.lock_open_outlined,
+                      iconColor: hasPassword
+                          ? const Color(0xFFFBBF24)
+                          : AppTheme.textSub,
+                      title: '비밀번호 관리',
+                      subtitle: hasPassword
+                          ? '비밀번호로 보호 중'
+                          : '비밀번호 없음',
+                      trailing: hasPassword
+                          ? Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFBBF24)
+                                    .withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: const Text('보호 중',
+                                  style: TextStyle(
+                                      color: Color(0xFFFBBF24),
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700)),
+                            )
+                          : null,
+                      onTap: _managePassword,
+                    ),
+                  ],
+
+                  // ⭐⭐⭐ 초대코드 → 공유 시트 트리거
                   if (room.inviteCode.isNotEmpty) ...[
                     const SizedBox(height: 10),
                     InkWell(
-                      onTap: _copyInviteCode,
+                      onTap: _shareInvite,
                       borderRadius: BorderRadius.circular(14),
                       child: Container(
                         padding: const EdgeInsets.all(16),
                         decoration: BoxDecoration(
                           color: AppTheme.bgCard,
                           borderRadius: BorderRadius.circular(14),
-                          border: Border.all(
-                              color: AppTheme.border),
+                          border: Border.all(color: AppTheme.border),
                         ),
                         child: Row(
                           children: [
                             Container(
-                              width: 40, height: 40,
+                              width: 40,
+                              height: 40,
                               decoration: BoxDecoration(
-                                color: AppTheme.primary
-                                    .withOpacity(0.15),
-                                borderRadius:
-                                    BorderRadius.circular(10),
+                                color: AppTheme.primary.withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(10),
                               ),
-                              child: const Icon(Icons.link,
-                                  color: AppTheme.primary,
-                                  size: 18),
+                              child: const Icon(Icons.share_outlined,
+                                  color: AppTheme.primary, size: 18),
                             ),
                             const SizedBox(width: 12),
                             Expanded(
@@ -558,26 +649,22 @@ class _GroupRoomInfoScreenState
                                 crossAxisAlignment:
                                     CrossAxisAlignment.start,
                                 children: [
-                                  Text('초대코드',
+                                  Text('초대 공유',
                                       style: TextStyle(
                                           fontSize: 12,
-                                          color:
-                                              AppTheme.textSub)),
+                                          color: AppTheme.textSub)),
                                   const SizedBox(height: 2),
                                   Text(room.inviteCode,
                                       style: const TextStyle(
                                           fontSize: 16,
-                                          fontWeight:
-                                              FontWeight.w800,
-                                          color: AppTheme
-                                              .primaryLight,
+                                          fontWeight: FontWeight.w800,
+                                          color: AppTheme.primaryLight,
                                           letterSpacing: 2)),
                                 ],
                               ),
                             ),
-                            Icon(Icons.copy,
-                                color: AppTheme.textSub,
-                                size: 18),
+                            Icon(Icons.chevron_right,
+                                color: AppTheme.textSub, size: 20),
                           ],
                         ),
                       ),
@@ -586,15 +673,12 @@ class _GroupRoomInfoScreenState
 
                   const SizedBox(height: 24),
 
-                  // ✨ 생성일
                   Row(
                     children: [
                       Icon(Icons.schedule_outlined,
-                          size: 14,
-                          color: AppTheme.textMuted),
+                          size: 14, color: AppTheme.textMuted),
                       const SizedBox(width: 6),
-                      Text(
-                          '${_formatDate(room.createdAt)}에 생성됨',
+                      Text('${_formatDate(room.createdAt)}에 생성됨',
                           style: TextStyle(
                               fontSize: 12,
                               color: AppTheme.textMuted)),
@@ -603,7 +687,6 @@ class _GroupRoomInfoScreenState
 
                   const SizedBox(height: 24),
 
-                  // ✨ 채팅방 나가기
                   InkWell(
                     onTap: _leaveRoom,
                     borderRadius: BorderRadius.circular(14),
@@ -611,27 +694,23 @@ class _GroupRoomInfoScreenState
                       width: double.infinity,
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFEF4444)
-                            .withOpacity(0.1),
+                        color: const Color(0xFFEF4444).withOpacity(0.1),
                         borderRadius: BorderRadius.circular(14),
                         border: Border.all(
                             color: const Color(0xFFEF4444)
                                 .withOpacity(0.3)),
                       ),
                       child: const Row(
-                        mainAxisAlignment:
-                            MainAxisAlignment.center,
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(Icons.exit_to_app,
-                              color: Color(0xFFEF4444),
-                              size: 20),
+                              color: Color(0xFFEF4444), size: 20),
                           SizedBox(width: 8),
                           Text('채팅방 나가기',
                               style: TextStyle(
                                   color: Color(0xFFEF4444),
                                   fontSize: 15,
-                                  fontWeight:
-                                      FontWeight.w700)),
+                                  fontWeight: FontWeight.w700)),
                         ],
                       ),
                     ),
@@ -741,8 +820,7 @@ class _MenuItem extends StatelessWidget {
                   const SizedBox(height: 2),
                   Text(subtitle,
                       style: TextStyle(
-                          fontSize: 12,
-                          color: AppTheme.textSub)),
+                          fontSize: 12, color: AppTheme.textSub)),
                 ],
               ),
             ),

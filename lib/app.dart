@@ -92,6 +92,29 @@ final routerProvider = Provider<GoRouter>((ref) {
       final session    = Supabase.instance.client.auth.currentSession;
       final isLoggedIn = session != null;
       final loc        = state.matchedLocation;
+      final fullPath   = state.uri.toString();
+      final uriPath    = state.uri.path;
+      final uriScheme  = state.uri.scheme;
+      final uriHost    = state.uri.host;
+
+      // ⭐ 디버그 로그 (어떤 URI가 들어오는지 확인용)
+      print('🔗 [Router redirect] '
+          'matched=$loc | full=$fullPath | '
+          'scheme=$uriScheme | host=$uriHost | path=$uriPath');
+
+      // ⭐⭐⭐ 딥링크 URI 가로채기
+      // path에 'join' 단어가 들어가거나 scheme/host가 우리 딥링크면 → /main으로
+      final isDeepLink =
+          uriScheme == 'kyorangtalk' ||
+          uriHost == 'open.kyorang.com' ||
+          uriPath.contains('/join/') ||
+          loc.contains('/join/') ||
+          fullPath.contains('://join');
+
+      if (isDeepLink) {
+        print('🔗 [Router] 딥링크 가로채기 → ${isLoggedIn ? "/main" : "/login"}');
+        return isLoggedIn ? '/main' : '/login';
+      }
 
       if (loc == '/') return null;
 
@@ -116,6 +139,22 @@ final routerProvider = Provider<GoRouter>((ref) {
       }
 
       return null;
+    },
+    // ⭐ 라우트 매칭 실패 시 (페이지 낫 파운드 예외 가로채기)
+    onException: (context, state, router) {
+      print('🔗 [Router] onException: ${state.uri}');
+      // 딥링크인지 확인
+      final uri = state.uri;
+      final isDeepLink = uri.scheme == 'kyorangtalk' ||
+          uri.host == 'open.kyorang.com' ||
+          uri.path.contains('/join/');
+      if (isDeepLink) {
+        // DeepLinkService가 알아서 처리할 거니까 그냥 메인으로
+        final session = Supabase.instance.client.auth.currentSession;
+        router.go(session != null ? '/main' : '/login');
+      } else {
+        router.go('/');
+      }
     },
     routes: [
       GoRoute(path: '/', builder: (_, __) => const SplashScreen()),
@@ -166,12 +205,10 @@ class KyorangTalkApp extends ConsumerWidget {
       routerConfig: router,
       debugShowCheckedModeBanner: false,
       builder: (context, child) {
-        // ✅ 1. AppTheme._isDark 동기화
         final brightness = Theme.of(context).brightness;
         final isDark = brightness == Brightness.dark;
         AppTheme.setDark(isDark);
-        
-        // ✅ 2. KeyedSubtree로 brightness 바뀌면 전체 트리 강제 재생성
+
         return KeyedSubtree(
           key: ValueKey<bool>(isDark),
           child: child ?? const SizedBox(),

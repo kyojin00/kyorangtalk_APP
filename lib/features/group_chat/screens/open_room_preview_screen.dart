@@ -6,6 +6,7 @@ import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../models/group_room_model.dart';
 import '../providers/group_chat_provider.dart';
+import '../widgets/password_dialog.dart';                       // ⭐ NEW
 import 'profile_select_screen.dart';
 
 class OpenRoomPreviewScreen extends ConsumerStatefulWidget {
@@ -26,14 +27,14 @@ class _OpenRoomPreviewScreenState
   bool _joining = false;
   bool _liking = false;
 
-  // ✨ 이미 멤버면 바로 입장
   Future<void> _goToRoom() async {
     Navigator.pop(context);
     context.push('/main/group/${widget.room.id}', extra: widget.room);
   }
 
-  // ✨ 새로 입장 (프로필 선택)
+  // ⭐⭐⭐ 새로 입장 (비번 보호 + 프로필 선택)
   Future<void> _joinRoom() async {
+    // 1) 프로필 선택
     final selection = await Navigator.push<ProfileSelection>(
       context,
       MaterialPageRoute(
@@ -42,24 +43,86 @@ class _OpenRoomPreviewScreenState
         ),
       ),
     );
-
     if (selection == null) return;
+    if (!mounted) return;
 
     setState(() => _joining = true);
 
     try {
-      await joinOpenRoom(
-        widget.room.id,
-        subProfileId: selection.subProfileId,
-      );
+      // 2) 비번 보호 여부 확인 (캐시 안 믿고 서버에서 다시)
+      final needsPw = await roomRequiresPassword(widget.room.id);
+
+      String? password;
+      String? errorMsg;
+
+      // 비번이 필요하면 입력 받기 (틀리면 재시도)
+      while (needsPw) {
+        if (!mounted) return;
+        password = await showRoomPasswordDialog(
+          context,
+          roomName: widget.room.name,
+          errorMessage: errorMsg,
+        );
+        if (password == null) {
+          // 취소
+          setState(() => _joining = false);
+          return;
+        }
+
+        final result = await joinRoomWithPassword(
+          roomId: widget.room.id,
+          password: password,
+          subProfileId: selection.subProfileId,
+        );
+
+        if (result == JoinResult.ok) break;
+        if (result == JoinResult.notFound) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('방을 찾을 수 없어요')),
+            );
+            setState(() => _joining = false);
+          }
+          return;
+        }
+        if (result == JoinResult.wrongPassword) {
+          errorMsg = '비밀번호가 틀렸어요';
+          continue;
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('입장에 실패했어요')),
+          );
+          setState(() => _joining = false);
+        }
+        return;
+      }
+
+      // 비번 없는 방 또는 비번 통과
+      if (!needsPw) {
+        final result = await joinRoomWithPassword(
+          roomId: widget.room.id,
+          password: null,
+          subProfileId: selection.subProfileId,
+        );
+        if (result != JoinResult.ok) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('입장에 실패했어요')),
+            );
+            setState(() => _joining = false);
+          }
+          return;
+        }
+      }
+
       ref.invalidate(groupRoomsProvider);
       ref.invalidate(openRoomsProvider);
       ref.invalidate(isRoomMemberProvider(widget.room.id));
 
       if (mounted) {
         Navigator.pop(context);
-        context.push('/main/group/${widget.room.id}',
-            extra: widget.room);
+        context.push('/main/group/${widget.room.id}', extra: widget.room);
       }
     } catch (e) {
       if (mounted) {
@@ -101,7 +164,6 @@ class _OpenRoomPreviewScreenState
   Widget build(BuildContext context) {
     final roomAsync = ref.watch(roomDetailProvider(widget.room.id));
     final isLikedAsync = ref.watch(isLikedProvider(widget.room.id));
-    // ✨ 내가 이 방의 멤버인지 확인
     final isMemberAsync = ref.watch(isRoomMemberProvider(widget.room.id));
     final isMember = isMemberAsync.value ?? false;
 
@@ -157,8 +219,7 @@ class _OpenRoomPreviewScreenState
                               color: AppTheme.bgCard,
                               image: room.avatarUrl != null
                                   ? DecorationImage(
-                                      image: NetworkImage(
-                                          room.avatarUrl!),
+                                      image: NetworkImage(room.avatarUrl!),
                                       fit: BoxFit.cover,
                                     )
                                   : null,
@@ -190,35 +251,58 @@ class _OpenRoomPreviewScreenState
                           ),
                           Positioned(
                             top: 80, left: 20,
-                            child: Row(
+                            child: Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
                               children: [
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 10, vertical: 5),
                                   decoration: BoxDecoration(
                                     color: const Color(0xFF06B6D4),
-                                    borderRadius:
-                                        BorderRadius.circular(8),
+                                    borderRadius: BorderRadius.circular(8),
                                   ),
                                   child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       const Icon(Icons.public,
-                                          color: Colors.white,
-                                          size: 12),
+                                          color: Colors.white, size: 12),
                                       const SizedBox(width: 4),
                                       Text(room.category,
                                           style: const TextStyle(
                                               color: Colors.white,
                                               fontSize: 11,
-                                              fontWeight:
-                                                  FontWeight.w700)),
+                                              fontWeight: FontWeight.w700)),
                                     ],
                                   ),
                                 ),
-                                // ✨ 참여 중 배지
-                                if (isMember) ...[
-                                  const SizedBox(width: 6),
+                                // ⭐ 비번 보호 배지
+                                if (room.hasPassword)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 5),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFFBBF24),
+                                      borderRadius:
+                                          BorderRadius.circular(8),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.lock,
+                                            color: Colors.white,
+                                            size: 12),
+                                        SizedBox(width: 4),
+                                        Text('비밀번호',
+                                            style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 11,
+                                                fontWeight:
+                                                    FontWeight.w700)),
+                                      ],
+                                    ),
+                                  ),
+                                if (isMember)
                                   Container(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 10, vertical: 5),
@@ -243,7 +327,6 @@ class _OpenRoomPreviewScreenState
                                       ],
                                     ),
                                   ),
-                                ],
                               ],
                             ),
                           ),
@@ -271,8 +354,7 @@ class _OpenRoomPreviewScreenState
                       Padding(
                         padding: const EdgeInsets.all(20),
                         child: Column(
-                          crossAxisAlignment:
-                              CrossAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Row(
                               children: [
@@ -297,18 +379,69 @@ class _OpenRoomPreviewScreenState
                             ),
                             const SizedBox(height: 24),
 
-                            // ✨ 멤버 아닐 때만 프로필 선택 안내 표시
+                            // ⭐ 비번 보호 안내 (멤버 아닐 때)
+                            if (!isMember && room.hasPassword) ...[
+                              Container(
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFBBF24)
+                                      .withOpacity(0.10),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: const Color(0xFFFBBF24)
+                                        .withOpacity(0.4),
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      width: 36, height: 36,
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFFBBF24)
+                                            .withOpacity(0.2),
+                                        borderRadius:
+                                            BorderRadius.circular(10),
+                                      ),
+                                      child: const Icon(Icons.lock,
+                                          color: Color(0xFFFBBF24),
+                                          size: 18),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text('비밀번호 보호 채팅방',
+                                              style: TextStyle(
+                                                  fontSize: 13,
+                                                  fontWeight:
+                                                      FontWeight.w800,
+                                                  color: AppTheme.textMain)),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                              '입장 시 방장이 설정한 비밀번호가 필요해요',
+                                              style: TextStyle(
+                                                  fontSize: 11,
+                                                  color: AppTheme.textSub)),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                            ],
+
+                            // 프로필 선택 안내 (멤버 아닐 때)
                             if (!isMember) ...[
                               Container(
                                 padding: const EdgeInsets.all(14),
                                 decoration: BoxDecoration(
-                                  color: AppTheme.primary
-                                      .withOpacity(0.08),
-                                  borderRadius:
-                                      BorderRadius.circular(12),
+                                  color: AppTheme.primary.withOpacity(0.08),
+                                  borderRadius: BorderRadius.circular(12),
                                   border: Border.all(
-                                    color: AppTheme.primary
-                                        .withOpacity(0.3),
+                                    color: AppTheme.primary.withOpacity(0.3),
                                   ),
                                 ),
                                 child: Row(
@@ -331,21 +464,18 @@ class _OpenRoomPreviewScreenState
                                         crossAxisAlignment:
                                             CrossAxisAlignment.start,
                                         children: [
-                                          Text(
-                                              '프로필을 선택해서 입장해요',
+                                          Text('프로필을 선택해서 입장해요',
                                               style: TextStyle(
                                                   fontSize: 13,
                                                   fontWeight:
                                                       FontWeight.w800,
-                                                  color: AppTheme
-                                                      .textMain)),
+                                                  color: AppTheme.textMain)),
                                           const SizedBox(height: 2),
                                           Text(
                                               '기본 프로필 또는 부캐 프로필 중 선택할 수 있어요',
                                               style: TextStyle(
                                                   fontSize: 11,
-                                                  color: AppTheme
-                                                      .textSub)),
+                                                  color: AppTheme.textSub)),
                                         ],
                                       ),
                                     ),
@@ -377,10 +507,8 @@ class _OpenRoomPreviewScreenState
                                     child: Text('#$tag',
                                         style: const TextStyle(
                                             fontSize: 12,
-                                            color:
-                                                AppTheme.primaryLight,
-                                            fontWeight:
-                                                FontWeight.w600)),
+                                            color: AppTheme.primaryLight,
+                                            fontWeight: FontWeight.w600)),
                                   );
                                 }).toList(),
                               ),
@@ -399,8 +527,7 @@ class _OpenRoomPreviewScreenState
                               decoration: BoxDecoration(
                                 color: AppTheme.bgCard,
                                 borderRadius: BorderRadius.circular(14),
-                                border: Border.all(
-                                    color: AppTheme.border),
+                                border: Border.all(color: AppTheme.border),
                               ),
                               child: Text(
                                 room.description?.isNotEmpty == true
@@ -408,8 +535,7 @@ class _OpenRoomPreviewScreenState
                                     : '아직 소개가 없어요',
                                 style: TextStyle(
                                     fontSize: 14,
-                                    color: room.description?.isNotEmpty ==
-                                            true
+                                    color: room.description?.isNotEmpty == true
                                         ? AppTheme.textMain
                                         : AppTheme.textMuted,
                                     height: 1.6),
@@ -419,10 +545,8 @@ class _OpenRoomPreviewScreenState
 
                             Row(
                               children: [
-                                Icon(
-                                    Icons.schedule_outlined,
-                                    size: 14,
-                                    color: AppTheme.textMuted),
+                                Icon(Icons.schedule_outlined,
+                                    size: 14, color: AppTheme.textMuted),
                                 const SizedBox(width: 6),
                                 Text(
                                     '${_formatDate(room.createdAt)}에 생성됨',
@@ -443,11 +567,9 @@ class _OpenRoomPreviewScreenState
               Container(
                 decoration: BoxDecoration(
                   color: AppTheme.bg,
-                  border: Border(
-                      top: BorderSide(color: AppTheme.border)),
+                  border: Border(top: BorderSide(color: AppTheme.border)),
                 ),
-                padding: EdgeInsets.fromLTRB(
-                    20, 12, 20,
+                padding: EdgeInsets.fromLTRB(20, 12, 20,
                     MediaQuery.of(context).padding.bottom + 12),
                 child: Row(
                   children: [
@@ -487,7 +609,6 @@ class _OpenRoomPreviewScreenState
                       ),
                     ),
                     const SizedBox(width: 10),
-                    // ✨ 멤버 여부에 따라 버튼 변경
                     Expanded(
                       child: ElevatedButton(
                         onPressed: _joining
@@ -498,18 +619,15 @@ class _OpenRoomPreviewScreenState
                               ? AppTheme.primary
                               : const Color(0xFF06B6D4),
                           foregroundColor: Colors.white,
-                          minimumSize:
-                              const Size(double.infinity, 50),
+                          minimumSize: const Size(double.infinity, 50),
                           shape: RoundedRectangleBorder(
-                              borderRadius:
-                                  BorderRadius.circular(14)),
+                              borderRadius: BorderRadius.circular(14)),
                         ),
                         child: _joining
                             ? const SizedBox(
                                 width: 20, height: 20,
                                 child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white))
+                                    strokeWidth: 2, color: Colors.white))
                             : Row(
                                 mainAxisAlignment:
                                     MainAxisAlignment.center,
@@ -517,18 +635,21 @@ class _OpenRoomPreviewScreenState
                                   Icon(
                                       isMember
                                           ? Icons.chat_bubble_rounded
-                                          : Icons.masks,
+                                          : (room.hasPassword
+                                              ? Icons.lock_open
+                                              : Icons.masks),
                                       color: Colors.white,
                                       size: 20),
                                   const SizedBox(width: 8),
                                   Text(
                                       isMember
                                           ? '채팅방 가기'
-                                          : '프로필 선택 후 입장',
+                                          : (room.hasPassword
+                                              ? '비밀번호 입력 후 입장'
+                                              : '프로필 선택 후 입장'),
                                       style: const TextStyle(
                                           fontSize: 15,
-                                          fontWeight:
-                                              FontWeight.w700)),
+                                          fontWeight: FontWeight.w700)),
                                 ],
                               ),
                       ),

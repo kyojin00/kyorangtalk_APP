@@ -15,6 +15,7 @@ class GroupRoomModel {
   final int unreadCount;
   final int likeCount;
   final List<String> tags;
+  final bool hasPassword;                                       // ⭐ NEW
 
   GroupRoomModel({
     required this.id,
@@ -33,6 +34,7 @@ class GroupRoomModel {
     this.unreadCount = 0,
     this.likeCount = 0,
     this.tags = const [],
+    this.hasPassword = false,                                   // ⭐ NEW
   });
 
   bool get isOpen => roomType == 'open';

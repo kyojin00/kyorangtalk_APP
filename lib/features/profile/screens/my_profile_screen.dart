@@ -1,5 +1,7 @@
 import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -33,6 +35,8 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
   void initState() {
     super.initState();
     _loadData();
+    _nicknameController.addListener(() => setState(() {}));
+    _statusController.addListener(() => setState(() {}));
   }
 
   @override
@@ -606,6 +610,17 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     );
   }
 
+  void _cancelEditing() {
+    setState(() {
+      _editing = false;
+      _nicknameController.text =
+          _profile?['nickname'] as String? ?? '';
+      _statusController.text =
+          _profile?['status_message'] as String? ?? '';
+    });
+    FocusScope.of(context).unfocus();
+  }
+
   @override
   Widget build(BuildContext context) {
     final nickname = _profile?['nickname'] as String? ?? '';
@@ -625,6 +640,8 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
 
     return Scaffold(
       backgroundColor: AppTheme.bg,
+      // ⭐ 편집 모드일 때 키보드가 입력 필드를 가리지 않도록
+      resizeToAvoidBottomInset: _editing,
       body: _loading
           ? const Center(
               child: CircularProgressIndicator(
@@ -672,6 +689,24 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                     ),
                   ),
 
+                // ⭐ 편집 모드용 backdrop (블러 + 어두운 오버레이)
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 250),
+                  child: _editing
+                      ? Positioned.fill(
+                          key: const ValueKey('edit_backdrop'),
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(
+                                sigmaX: 8, sigmaY: 8),
+                            child: Container(
+                              color: Colors.black.withOpacity(0.45),
+                            ),
+                          ),
+                        )
+                      : const SizedBox.shrink(
+                          key: ValueKey('no_backdrop')),
+                ),
+
                 ..._stickers.map((sticker) {
                   final id = sticker['id'] as String;
                   final emoji = sticker['emoji'] as String;
@@ -703,401 +738,501 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                 }),
 
                 SafeArea(
-                  child: Column(
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 4),
-                        child: Row(
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.close,
-                                  color: Colors.white, size: 24),
-                              onPressed: _stickerMode
-                                  ? () => setState(
-                                      () => _stickerMode = false)
-                                  : () => Navigator.pop(context),
-                            ),
-                            const Spacer(),
-                            if (_stickerMode) ...[
-                              IconButton(
-                                icon: const Icon(
-                                    Icons.add_reaction_outlined,
-                                    color: Colors.white,
-                                    size: 24),
-                                onPressed:
-                                    _saving ? null : _addSticker,
-                              ),
-                              TextButton(
-                                onPressed: () => setState(
-                                    () => _stickerMode = false),
-                                child: const Text('완료',
-                                    style: TextStyle(
-                                        color: Colors.white,
-                                        fontWeight:
-                                            FontWeight.w800)),
-                              ),
-                            ] else if (!_editing) ...[
-                              _MultiProfileButton(
-                                count: _subProfilesCount,
-                                onTap: () async {
-                                  await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) =>
-                                          const SubProfilesScreen(),
-                                    ),
-                                  );
-                                  _loadSubProfilesCount();
-                                },
-                              ),
-                              IconButton(
-                                icon: const Icon(
-                                    Icons.emoji_emotions_outlined,
-                                    color: Colors.white,
-                                    size: 22),
-                                onPressed: () => setState(
-                                    () => _stickerMode = true),
-                                tooltip: '스티커',
-                              ),
-                              IconButton(
-                                icon: const Icon(
-                                    Icons.wallpaper_outlined,
-                                    color: Colors.white,
-                                    size: 22),
-                                onPressed: _saving
-                                    ? null
-                                    : _changeBackground,
-                                tooltip: '배경화면',
-                              ),
-                              IconButton(
-                                icon: const Icon(
-                                    Icons.edit_outlined,
-                                    color: Colors.white,
-                                    size: 22),
-                                onPressed: () {
-                                  setState(
-                                      () => _editing = true);
-                                },
-                              ),
-                            ] else ...[
-                              TextButton(
-                                onPressed: _saving
-                                    ? null
-                                    : () {
-                                        setState(() {
-                                          _editing = false;
-                                          _nicknameController
-                                                  .text =
-                                              _profile?[
-                                                      'nickname']
-                                                  as String? ??
-                                                  '';
-                                          _statusController
-                                                  .text =
-                                              _profile?[
-                                                      'status_message']
-                                                  as String? ??
-                                                  '';
-                                        });
-                                      },
-                                child: const Text('취소',
-                                    style: TextStyle(
-                                        color: Colors.white70)),
-                              ),
-                              TextButton(
-                                onPressed:
-                                    _saving ? null : _saveProfile,
-                                child: _saving
-                                    ? const SizedBox(
-                                        width: 16,
-                                        height: 16,
-                                        child:
-                                            CircularProgressIndicator(
-                                                strokeWidth: 2,
-                                                color:
-                                                    Colors.white))
-                                    : const Text('저장',
-                                        style: TextStyle(
-                                            color: Colors.white,
-                                            fontWeight:
-                                                FontWeight.w800)),
-                              ),
-                            ],
-                          ],
+                  child: _editing
+                      ? _buildEditingLayout(avatar, nickname)
+                      : _buildViewingLayout(
+                          avatar: avatar,
+                          nickname: nickname,
+                          statusMessage: statusMessage,
+                          pastAvatars: pastAvatars,
+                          thumbSize: thumbSize,
                         ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════
+  // 일반 보기 모드
+  // ═══════════════════════════════════════════════════
+  Widget _buildViewingLayout({
+    required String? avatar,
+    required String nickname,
+    required String? statusMessage,
+    required List<Map<String, dynamic>> pastAvatars,
+    required double thumbSize,
+  }) {
+    return Column(
+      children: [
+        // ─── 상단 액션 바 ───
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          child: Row(
+            children: [
+              IconButton(
+                icon: const Icon(Icons.close,
+                    color: Colors.white, size: 24),
+                onPressed: _stickerMode
+                    ? () => setState(() => _stickerMode = false)
+                    : () => Navigator.pop(context),
+              ),
+              const Spacer(),
+              if (_stickerMode) ...[
+                IconButton(
+                  icon: const Icon(Icons.add_reaction_outlined,
+                      color: Colors.white, size: 24),
+                  onPressed: _saving ? null : _addSticker,
+                ),
+                TextButton(
+                  onPressed: () =>
+                      setState(() => _stickerMode = false),
+                  child: const Text('완료',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800)),
+                ),
+              ] else ...[
+                _MultiProfileButton(
+                  count: _subProfilesCount,
+                  onTap: () async {
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            const SubProfilesScreen(),
                       ),
+                    );
+                    _loadSubProfilesCount();
+                  },
+                ),
+                IconButton(
+                  icon: const Icon(
+                      Icons.emoji_emotions_outlined,
+                      color: Colors.white,
+                      size: 22),
+                  onPressed: () =>
+                      setState(() => _stickerMode = true),
+                  tooltip: '스티커',
+                ),
+                IconButton(
+                  icon: const Icon(Icons.wallpaper_outlined,
+                      color: Colors.white, size: 22),
+                  onPressed:
+                      _saving ? null : _changeBackground,
+                  tooltip: '배경화면',
+                ),
+                IconButton(
+                  icon: const Icon(Icons.edit_outlined,
+                      color: Colors.white, size: 22),
+                  onPressed: () =>
+                      setState(() => _editing = true),
+                ),
+              ],
+            ],
+          ),
+        ),
 
-                      const Spacer(flex: 2),
+        const Spacer(flex: 2),
 
-                      if (!_stickerMode)
-                        Stack(
-                          children: [
-                            GestureDetector(
-                              onTap: avatar != null
-                                  ? () =>
-                                      _showAvatarFullscreen(avatar)
-                                  : null,
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: AppTheme.primary
-                                          .withOpacity(0.3),
-                                      blurRadius: 20,
-                                    ),
-                                  ],
-                                  border: Border.all(
-                                      color: Colors.white
-                                          .withOpacity(0.2),
-                                      width: 2),
-                                ),
-                                child: AvatarWidget(
-                                  url:  avatar,
-                                  name: nickname,
-                                  size: 100,
-                                ),
-                              ),
-                            ),
-                            Positioned(
-                              bottom: 0, right: 0,
-                              child: GestureDetector(
-                                onTap: _saving
-                                    ? null
-                                    : _changeAvatar,
-                                child: Container(
-                                  width: 34, height: 34,
-                                  decoration: BoxDecoration(
-                                    color: AppTheme.primary,
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                        color: AppTheme.bg,
-                                        width: 3),
-                                  ),
-                                  child: _saving
-                                      ? const Padding(
-                                          padding:
-                                              EdgeInsets.all(8),
-                                          child:
-                                              CircularProgressIndicator(
-                                                  strokeWidth: 2,
-                                                  color:
-                                                      Colors.white),
-                                        )
-                                      : const Icon(
-                                          Icons.camera_alt,
-                                          color: Colors.white,
-                                          size: 16),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-
-                      if (!_stickerMode) ...[
-                        const SizedBox(height: 16),
-
-                        if (!_editing)
-                          Text(
-                            nickname,
-                            style: TextStyle(
-                                fontSize: 22,
-                                fontWeight: FontWeight.w800,
-                                color: Colors.white,
-                                shadows: [
-                                  Shadow(
-                                    color: Colors.black
-                                        .withOpacity(0.5),
-                                    blurRadius: 8,
-                                  ),
-                                ]),
-                          )
-                        else
-                          Padding(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 48),
-                            child: TextField(
-                              controller: _nicknameController,
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.w700,
-                                  color: Colors.white),
-                              maxLength: 20,
-                              decoration: InputDecoration(
-                                hintText: '닉네임',
-                                hintStyle: TextStyle(
-                                    color: Colors.white
-                                        .withOpacity(0.3)),
-                                counterStyle: TextStyle(
-                                    color: Colors.white
-                                        .withOpacity(0.4),
-                                    fontSize: 10),
-                                enabledBorder:
-                                    UnderlineInputBorder(
-                                  borderSide: BorderSide(
-                                      color: Colors.white
-                                          .withOpacity(0.2)),
-                                ),
-                                focusedBorder:
-                                    const UnderlineInputBorder(
-                                  borderSide: BorderSide(
-                                      color: AppTheme
-                                          .primaryLight),
-                                ),
-                              ),
-                            ),
-                          ),
-
-                        const SizedBox(height: 8),
-
-                        if (!_editing) ...[
-                          if (statusMessage != null &&
-                              statusMessage.isNotEmpty)
-                            Padding(
-                              padding: const EdgeInsets
-                                  .symmetric(horizontal: 40),
-                              child: Text(
-                                statusMessage,
-                                style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.white
-                                        .withOpacity(0.85),
-                                    shadows: [
-                                      Shadow(
-                                        color: Colors.black
-                                            .withOpacity(0.5),
-                                        blurRadius: 6,
-                                      ),
-                                    ]),
-                                textAlign: TextAlign.center,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                        ] else
-                          Padding(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 48),
-                            child: TextField(
-                              controller: _statusController,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                  fontSize: 14,
-                                  color: Colors.white
-                                      .withOpacity(0.8)),
-                              maxLength: 50,
-                              decoration: InputDecoration(
-                                hintText: '상태 메시지 (선택)',
-                                hintStyle: TextStyle(
-                                    color: Colors.white
-                                        .withOpacity(0.3)),
-                                counterStyle: TextStyle(
-                                    color: Colors.white
-                                        .withOpacity(0.4),
-                                    fontSize: 10),
-                                border: InputBorder.none,
-                              ),
-                            ),
-                          ),
-                      ],
-
-                      const Spacer(flex: 3),
-
-                      if (_stickerMode)
-                        Container(
-                          margin: const EdgeInsets.symmetric(
-                              horizontal: 20, vertical: 12),
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withOpacity(0.6),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Row(
-                            children: [
-                              Icon(Icons.touch_app,
-                                  color: Colors.white, size: 18),
-                              SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  '스티커를 드래그해서 이동, 탭해서 편집하세요',
-                                  style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 12),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-
-                      if (!_stickerMode && !_editing &&
-                          pastAvatars.isNotEmpty) ...[
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(
-                              20, 8, 20, 10),
-                          child: Row(
-                            children: [
-                              Icon(Icons.history_rounded,
-                                  color: AppTheme.textSub,
-                                  size: 15),
-                              const SizedBox(width: 6),
-                              Text(
-                                '이전 프로필 사진 ${pastAvatars.length}개',
-                                style: TextStyle(
-                                    fontSize: 13,
-                                    color: AppTheme.textSub,
-                                    fontWeight:
-                                        FontWeight.w700),
-                              ),
-                            ],
-                          ),
-                        ),
-                        SizedBox(
-                          height: thumbSize,
-                          child: ListView.separated(
-                            scrollDirection: Axis.horizontal,
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 20),
-                            itemCount: pastAvatars.length,
-                            separatorBuilder: (_, __) =>
-                                const SizedBox(width: 10),
-                            itemBuilder: (_, i) {
-                              final item = pastAvatars[i];
-                              final url =
-                                  item['avatar_url'] as String;
-                              return GestureDetector(
-                                onTap: () =>
-                                    _showAvatarFullscreen(url),
-                                child: ClipRRect(
-                                  borderRadius:
-                                      BorderRadius.circular(14),
-                                  child: Image.network(
-                                    url,
-                                    width: thumbSize,
-                                    height: thumbSize,
-                                    fit: BoxFit.cover,
-                                    errorBuilder:
-                                        (_, __, ___) =>
-                                            Container(
-                                      width: thumbSize,
-                                      height: thumbSize,
-                                      color: AppTheme.border,
-                                    ),
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                      ],
-
-                      const SizedBox(height: 24),
+        if (!_stickerMode)
+          Stack(
+            children: [
+              GestureDetector(
+                onTap: avatar != null
+                    ? () => _showAvatarFullscreen(avatar)
+                    : null,
+                child: Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color:
+                            AppTheme.primary.withOpacity(0.3),
+                        blurRadius: 20,
+                      ),
                     ],
+                    border: Border.all(
+                        color: Colors.white.withOpacity(0.2),
+                        width: 2),
+                  ),
+                  child: AvatarWidget(
+                    url: avatar,
+                    name: nickname,
+                    size: 100,
+                  ),
+                ),
+              ),
+              Positioned(
+                bottom: 0,
+                right: 0,
+                child: GestureDetector(
+                  onTap: _saving ? null : _changeAvatar,
+                  child: Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: AppTheme.primary,
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                          color: AppTheme.bg, width: 3),
+                    ),
+                    child: _saving
+                        ? const Padding(
+                            padding: EdgeInsets.all(8),
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white),
+                          )
+                        : const Icon(Icons.camera_alt,
+                            color: Colors.white, size: 16),
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+        if (!_stickerMode) ...[
+          const SizedBox(height: 16),
+          Text(
+            nickname,
+            style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+                color: Colors.white,
+                shadows: [
+                  Shadow(
+                    color: Colors.black.withOpacity(0.5),
+                    blurRadius: 8,
+                  ),
+                ]),
+          ),
+          const SizedBox(height: 8),
+          if (statusMessage != null && statusMessage.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 40),
+              child: Text(
+                statusMessage,
+                style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.white.withOpacity(0.85),
+                    shadows: [
+                      Shadow(
+                        color: Colors.black.withOpacity(0.5),
+                        blurRadius: 6,
+                      ),
+                    ]),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+        ],
+
+        const Spacer(flex: 3),
+
+        // ─── 스티커 모드 안내 ───
+        if (_stickerMode)
+          Container(
+            margin: const EdgeInsets.symmetric(
+                horizontal: 20, vertical: 12),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.6),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Row(
+              children: [
+                Icon(Icons.touch_app,
+                    color: Colors.white, size: 18),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '스티커를 드래그해서 이동, 탭해서 편집하세요',
+                    style: TextStyle(
+                        color: Colors.white, fontSize: 12),
                   ),
                 ),
               ],
             ),
+          ),
+
+        // ─── 이전 프로필 사진 ───
+        if (!_stickerMode && pastAvatars.isNotEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
+            child: Row(
+              children: [
+                Icon(Icons.history_rounded,
+                    color: AppTheme.textSub, size: 15),
+                const SizedBox(width: 6),
+                Text(
+                  '이전 프로필 사진 ${pastAvatars.length}개',
+                  style: TextStyle(
+                      fontSize: 13,
+                      color: AppTheme.textSub,
+                      fontWeight: FontWeight.w700),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(
+            height: thumbSize,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 20),
+              itemCount: pastAvatars.length,
+              separatorBuilder: (_, __) =>
+                  const SizedBox(width: 10),
+              itemBuilder: (_, i) {
+                final item = pastAvatars[i];
+                final url = item['avatar_url'] as String;
+                return GestureDetector(
+                  onTap: () => _showAvatarFullscreen(url),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: Image.network(
+                      url,
+                      width: thumbSize,
+                      height: thumbSize,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Container(
+                        width: thumbSize,
+                        height: thumbSize,
+                        color: AppTheme.border,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════════
+  // ⭐⭐⭐ 편집 모드 (재정비)
+  // ═══════════════════════════════════════════════════
+  Widget _buildEditingLayout(String? avatar, String currentNickname) {
+    final nicknameLen = _nicknameController.text.characters.length;
+    final statusLen = _statusController.text.characters.length;
+    final canSave = nicknameLen >= 2 && !_saving;
+
+    return Column(
+      children: [
+        // ─── 상단 바: 취소 / 제목 / 저장 ───
+        SizedBox(
+          height: 52,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              children: [
+                // 취소
+                TextButton(
+                  onPressed: _saving ? null : _cancelEditing,
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.white.withOpacity(0.85),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                    minimumSize: const Size(60, 36),
+                  ),
+                  child: const Text('취소',
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600)),
+                ),
+                // 제목 (가운데 정렬, 길어지면 ...)
+                const Expanded(
+                  child: Center(
+                    child: Text(
+                      '프로필 편집',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+                // 저장
+                ElevatedButton(
+                  onPressed: canSave ? _saveProfile : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.primary,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor:
+                        Colors.white.withOpacity(0.12),
+                    disabledForegroundColor:
+                        Colors.white.withOpacity(0.4),
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 18, vertical: 8),
+                    minimumSize: const Size(60, 36),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                  ),
+                  child: _saving
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white),
+                        )
+                      : const Text('저장',
+                          style: TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w800)),
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        // ─── 본문은 스크롤 가능 (키보드 대응) ───
+        Expanded(
+          child: SingleChildScrollView(
+            physics: const ClampingScrollPhysics(),
+            padding: const EdgeInsets.only(bottom: 24),
+            child: Column(
+              children: [
+                const SizedBox(height: 12),
+
+                // ─── 아바타 ───
+                Stack(
+                  children: [
+                    Container(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppTheme.primary.withOpacity(0.35),
+                            blurRadius: 24,
+                          ),
+                        ],
+                        border: Border.all(
+                            color: Colors.white.withOpacity(0.25),
+                            width: 2),
+                      ),
+                      child: AvatarWidget(
+                        url: avatar,
+                        name: currentNickname,
+                        size: 96,
+                      ),
+                    ),
+                    Positioned(
+                      bottom: 0,
+                      right: 0,
+                      child: GestureDetector(
+                        onTap: _saving ? null : _changeAvatar,
+                        child: Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            color: AppTheme.primary,
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                                color: AppTheme.bg, width: 3),
+                          ),
+                          child: const Icon(Icons.camera_alt,
+                              color: Colors.white, size: 14),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+
+                const SizedBox(height: 8),
+                Text(
+                  '프로필 사진을 눌러 변경',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.55),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+
+                const SizedBox(height: 28),
+
+                // ─── 입력 카드 ───
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(18, 18, 18, 14),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.35),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                          color: Colors.white.withOpacity(0.15)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _FieldLabel(
+                            label: '닉네임',
+                            count: nicknameLen,
+                            max: 20),
+                        const SizedBox(height: 6),
+                        _GlassTextField(
+                          controller: _nicknameController,
+                          hintText: '예: 교진',
+                          maxLength: 20,
+                          textInputAction: TextInputAction.next,
+                          inputFormatters: [
+                            LengthLimitingTextInputFormatter(20),
+                          ],
+                        ),
+                        Padding(
+                          padding:
+                              const EdgeInsets.only(top: 6, left: 4),
+                          child: Text(
+                            nicknameLen < 2
+                                ? '2자 이상 입력해주세요'
+                                : '한국어, 영문, 숫자 모두 가능해요',
+                            style: TextStyle(
+                              color: nicknameLen < 2
+                                  ? const Color(0xFFFCA5A5)
+                                  : Colors.white.withOpacity(0.5),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+
+                        const SizedBox(height: 18),
+
+                        _FieldLabel(
+                            label: '상태 메시지',
+                            count: statusLen,
+                            max: 50,
+                            optional: true),
+                        const SizedBox(height: 6),
+                        _GlassTextField(
+                          controller: _statusController,
+                          hintText: '오늘의 기분이나 짧은 한마디',
+                          maxLength: 50,
+                          textInputAction: TextInputAction.done,
+                          maxLines: 2,
+                          inputFormatters: [
+                            LengthLimitingTextInputFormatter(50),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1113,6 +1248,170 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     '👑', '💎', '💍', '👗', '👠', '🎩', '🕶️', '💄',
     '☕', '🍵', '🧃', '🍹', '🍸', '🥂', '🍷', '🍾',
   ];
+}
+
+// ═══════════════════════════════════════════════════
+// 입력 필드 라벨 (제목 + 글자수)
+// ═══════════════════════════════════════════════════
+class _FieldLabel extends StatelessWidget {
+  final String label;
+  final int count;
+  final int max;
+  final bool optional;
+
+  const _FieldLabel({
+    required this.label,
+    required this.count,
+    required this.max,
+    this.optional = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.2,
+          ),
+        ),
+        if (optional) ...[
+          const SizedBox(width: 6),
+          Text(
+            '선택',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.4),
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+        const Spacer(),
+        Text(
+          '$count / $max',
+          style: TextStyle(
+            color: Colors.white.withOpacity(0.5),
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// 글래스모피즘 텍스트 필드
+// ═══════════════════════════════════════════════════
+class _GlassTextField extends StatefulWidget {
+  final TextEditingController controller;
+  final String hintText;
+  final int maxLength;
+  final int maxLines;
+  final TextInputAction? textInputAction;
+  final List<TextInputFormatter>? inputFormatters;
+
+  const _GlassTextField({
+    required this.controller,
+    required this.hintText,
+    required this.maxLength,
+    this.maxLines = 1,
+    this.textInputAction,
+    this.inputFormatters,
+  });
+
+  @override
+  State<_GlassTextField> createState() => _GlassTextFieldState();
+}
+
+class _GlassTextFieldState extends State<_GlassTextField> {
+  final _focusNode = FocusNode();
+  bool _focused = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(() {
+      if (_focused != _focusNode.hasFocus) {
+        setState(() => _focused = _focusNode.hasFocus);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      padding: const EdgeInsets.symmetric(
+          horizontal: 14, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(_focused ? 0.55 : 0.45),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: _focused
+              ? AppTheme.primaryLight.withOpacity(0.7)
+              : Colors.white.withOpacity(0.18),
+          width: _focused ? 1.5 : 1,
+        ),
+      ),
+      // ⭐ 부모 테마의 InputDecorationTheme(fillColor 흰색 등)을 차단
+      child: Theme(
+        data: Theme.of(context).copyWith(
+          inputDecorationTheme: const InputDecorationTheme(
+            filled: false,
+            fillColor: Colors.transparent,
+            border: InputBorder.none,
+            enabledBorder: InputBorder.none,
+            focusedBorder: InputBorder.none,
+            disabledBorder: InputBorder.none,
+            errorBorder: InputBorder.none,
+            focusedErrorBorder: InputBorder.none,
+          ),
+        ),
+        child: TextField(
+          controller: widget.controller,
+          focusNode: _focusNode,
+          cursorColor: AppTheme.primaryLight,
+          style: const TextStyle(
+              color: Colors.white,
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.1),
+          maxLength: widget.maxLength,
+          maxLines: widget.maxLines,
+          textInputAction: widget.textInputAction,
+          inputFormatters: widget.inputFormatters,
+          decoration: InputDecoration(
+            hintText: widget.hintText,
+            hintStyle: TextStyle(
+              color: Colors.white.withOpacity(0.45),
+              fontWeight: FontWeight.w500,
+            ),
+            counterText: '',
+            // ⭐ 명시적으로 채움 끔
+            filled: false,
+            fillColor: Colors.transparent,
+            border: InputBorder.none,
+            enabledBorder: InputBorder.none,
+            focusedBorder: InputBorder.none,
+            isDense: true,
+            contentPadding:
+                const EdgeInsets.symmetric(vertical: 12),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _MultiProfileButton extends StatelessWidget {
@@ -1141,7 +1440,8 @@ class _MultiProfileButton extends StatelessWidget {
           ),
           if (count > 0)
             Positioned(
-              top: 6, right: 6,
+              top: 6,
+              right: 6,
               child: Container(
                 padding: const EdgeInsets.symmetric(
                     horizontal: 4, vertical: 1),
@@ -1221,7 +1521,7 @@ class _DraggableStickerState extends State<_DraggableSticker> {
 
     return Positioned(
       left: _x - size / 2,
-      top:  _y - size / 2,
+      top: _y - size / 2,
       child: GestureDetector(
         onTap: widget.onTap,
         onPanUpdate: widget.editMode
@@ -1236,7 +1536,7 @@ class _DraggableStickerState extends State<_DraggableSticker> {
             ? (_) => widget.onPositionChanged(_x, _y)
             : null,
         child: Container(
-          width:  size,
+          width: size,
           height: size,
           decoration: widget.editMode
               ? BoxDecoration(
