@@ -542,18 +542,8 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     setState(() => _saving = true);
     try {
       final supabase = Supabase.instance.client;
-      final existing = await supabase
-          .from('kyorangtalk_profiles')
-          .select('id')
-          .eq('nickname', nickname)
-          .neq('id', _myId)
-          .maybeSingle();
 
-      if (existing != null) {
-        setState(() => _saving = false);
-        _showSnack('이미 사용 중인 닉네임이에요');
-        return;
-      }
+      // ⭐ 닉네임 중복 체크 제거: 동명이인 허용
 
       final status = _statusController.text.trim();
       await supabase.from('kyorangtalk_profiles').upsert({

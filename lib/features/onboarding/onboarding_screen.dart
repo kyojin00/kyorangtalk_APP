@@ -139,20 +139,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen>
     try {
       print('🟡 온보딩 시작, userId: ${user.id}');
 
-      final existing = await supabase
-          .from('kyorangtalk_profiles')
-          .select('id')
-          .eq('nickname', nickname)
-          .neq('id', user.id)
-          .maybeSingle();
-
-      if (existing != null) {
-        setState(() {
-          _error = '이미 사용 중인 닉네임이에요';
-          _loading = false;
-        });
-        return;
-      }
+      // ⭐ 닉네임 중복 체크 제거: 동명이인 허용
+      // (kyorangtalk_profiles.nickname의 UNIQUE 인덱스도 SQL로 제거됨)
 
       final signupMethod = _getSignupMethod(user);
       final now = DateTime.now().toIso8601String();

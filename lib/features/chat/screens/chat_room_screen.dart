@@ -67,6 +67,9 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   bool _disposed = false;
   bool _summaryDismissed = false;
 
+  // ⭐ Summary 활성화 임계값 (D)
+  static const int kSummaryMinUnread = 5;
+
   String? _smartReplyDismissedFor;
   bool _inputIsEmpty = true;
 
@@ -90,12 +93,19 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   List<MessageModel>? _lastMessages;
   List<MessageGroup> _cachedGroups = [];
 
-  // ⭐ 실패한 메시지 (영구 저장)
+  // ⭐ 캐싱 (C): build 안에서 매번 정렬/필터하지 않도록
+  List<MessageModel> _sortedMessages = const [];
+  List<String> _recentContextCache = const [];
+
+  // 실패한 메시지 (영구 저장)
   List<PendingMessage> _failedMessages = [];
   final Set<String> _retryingIds = <String>{};
 
-  // ⭐ Draft 자동 저장용 디바운서
+  // Draft 자동 저장용 디바운서
   Timer? _draftSaveDebouncer;
+
+  // ⭐ markAllRead debounce (B)
+  Timer? _markReadDebouncer;
 
   bool get _isStatusLoaded =>
       _isBlocked != null &&
@@ -107,7 +117,10 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     super.initState();
     currentOpenRoomId = widget.room.roomId;
     _pinnedMessage = widget.room.pinnedMessage;
+
+    // 진입 시 첫 호출은 즉시 (그 이후는 debounce)
     _markAllRead();
+
     _loadMuteStatus();
     _loadAllStatus();
     _listenBlockChanges();
@@ -223,6 +236,7 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     _disposed = true;
     currentOpenRoomId = null;
     _draftSaveDebouncer?.cancel();
+    _markReadDebouncer?.cancel();
     DraftStore.save(
       roomId: widget.room.roomId,
       isGroup: false,
@@ -369,6 +383,14 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     } catch (_) {}
   }
 
+  // ⭐ B: debounce 적용된 호출
+  void _scheduleMarkAllRead() {
+    _markReadDebouncer?.cancel();
+    _markReadDebouncer = Timer(const Duration(seconds: 1), () {
+      if (!_disposed && mounted) _markAllRead();
+    });
+  }
+
   void _listenBlockChanges() {
     try {
       _blockChannel = Supabase.instance.client
@@ -420,7 +442,7 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
         messageId: msg.id,
         messageText: text,
         senderName: senderName,
-        context: _getRecentMessagesForContext(),
+        context: _recentContextCache,
       );
 
       if (plan != null && !_disposed && mounted) {
@@ -431,19 +453,9 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     }
   }
 
-  void _extractPlansForRecentMessages(List<MessageModel> messages) {
-    final sorted = [...messages]
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    final recent =
-        sorted.length > 30 ? sorted.sublist(sorted.length - 30) : sorted;
-
-    final cutoff = DateTime.now().subtract(const Duration(hours: 24));
-    final candidates = recent.where((m) => m.createdAt.isAfter(cutoff));
-
-    for (final msg in candidates) {
-      _tryExtractPlan(msg);
-    }
-  }
+  // ⭐ A: 입장 시 30개 한꺼번에 추출하는 함수 제거됨.
+  //       대신 itemBuilder가 화면에 빌드할 때만 _tryExtractPlan 호출.
+  //       (캐시 히트면 즉시, 미스면 백그라운드 1건만)
 
   Future<void> _sendFriendRequest() async {
     if (_friendRequestSending) return;
@@ -579,15 +591,20 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     });
   }
 
-  List<MessageModel> _getSortedMessages() {
-    final msgs = ref.read(messagesProvider(widget.room.roomId)).value ?? [];
-    return [...msgs]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-  }
+  // ⭐ C: 캐시된 정렬 결과 반환 (build 안에서 매번 sort 안 함)
+  List<MessageModel> _getSortedMessages() => _sortedMessages;
 
-  List<String> _getRecentMessagesForContext() {
-    final msgs =
-        ref.read(messagesProvider(widget.room.roomId)).value ?? [];
-    final recent = msgs.reversed
+  // ⭐ C: 캐시된 컨텍스트 반환
+  List<String> _getRecentMessagesForContext() => _recentContextCache;
+
+  // ⭐ ref.listen에서 메시지 변경 시 한 번만 정렬/필터
+  void _updateMessageCaches(List<MessageModel> msgs) {
+    final sorted = [...msgs]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    _sortedMessages = sorted;
+
+    // 최근 5개 텍스트 메시지로 컨텍스트 구성
+    final recent = sorted.reversed
         .where((m) =>
             !m.isDeleted &&
             !m.isImageMessage &&
@@ -601,22 +618,19 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
         .reversed
         .toList();
 
-    return recent.map((m) {
+    _recentContextCache = recent.map((m) {
       final speaker =
           m.senderId == _myId ? '나' : widget.room.partnerName;
       return '$speaker: ${m.content}';
     }).toList();
   }
 
-  MessageModel? _getSmartReplyTargetMessage() {
+  // ⭐ C: build에서 시간 조건만 평가, 정렬은 안 함
+  MessageModel? _computeSmartReplyTarget() {
     if (!_inputIsEmpty) return null;
+    if (_sortedMessages.isEmpty) return null;
 
-    final msgs = ref.read(messagesProvider(widget.room.roomId)).value ?? [];
-    if (msgs.isEmpty) return null;
-
-    final sorted = [...msgs]
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    final last = sorted.last;
+    final last = _sortedMessages.last;
 
     if (last.senderId == _myId) return null;
     if (last.isDeleted) return null;
@@ -806,9 +820,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     }
   }
 
-  // ═══════════════════════════════════════════════════
-  // ⭐ 메시지 전송 (톤 보정 제거됨)
-  // ═══════════════════════════════════════════════════
   Future<void> _send() async {
     final content = _inputController.text.trim();
     if (content.isEmpty || _sending) return;
@@ -1262,21 +1273,27 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       if (_disposed) return;
       next.whenData((msgs) {
         if (_disposed) return;
+
+        // ⭐ C: 메시지 변경 시점에 한 번만 정렬/컨텍스트 갱신
+        _updateMessageCaches(msgs);
+
         if (prev?.value == null) {
           _forceScrollToBottom();
-          _extractPlansForRecentMessages(msgs);
+          // ⭐ A: 입장 시 30개 일괄 추출 안 함. itemBuilder가 처리.
           return;
         }
+
         final prevIds = prev!.value!.map((m) => m.id).toSet();
         final newMessages =
             msgs.where((m) => !prevIds.contains(m.id)).toList();
+
         if (newMessages.isNotEmpty) {
           final sortedNew = [...newMessages]
             ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
           final latestNew = sortedNew.last;
-          final allSorted = [...msgs]
-            ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-          final isAtBottom = allSorted.last.id == latestNew.id;
+          final allSorted = _sortedMessages;
+          final isAtBottom = allSorted.isNotEmpty &&
+              allSorted.last.id == latestNew.id;
 
           if (isAtBottom) {
             final isMyMessage = latestNew.senderId == _myId;
@@ -1288,8 +1305,10 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           }
           final unread =
               msgs.where((m) => m.senderId != _myId && !m.isRead).toList();
-          if (unread.isNotEmpty) _markAllRead();
+          // ⭐ B: 매번 즉시 호출 → debounce 1초
+          if (unread.isNotEmpty) _scheduleMarkAllRead();
 
+          // 새 메시지만 plan 추출 시도 (1건씩)
           for (final msg in newMessages) {
             _tryExtractPlan(msg);
           }
@@ -1298,7 +1317,11 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     });
 
     final isAnyBlocked = _isBlocked == true || _isBlockedByPartner == true;
-    final smartReplyTarget = _getSmartReplyTargetMessage();
+    final smartReplyTarget = _computeSmartReplyTarget();
+
+    // ⭐ D: SummaryBanner는 unread가 임계값 이상일 때만
+    final showSummary = !_summaryDismissed &&
+        widget.room.unreadCount >= kSummaryMinUnread;
 
     return Scaffold(
       backgroundColor: AppTheme.bg,
@@ -1314,7 +1337,7 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
                 onUnpin: _unpinMessage,
               ),
 
-            if (!_summaryDismissed)
+            if (showSummary)
               SummaryBanner(
                 roomId: widget.room.roomId,
                 isGroup: false,
@@ -1598,6 +1621,12 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
         }
 
         final msg = item.message!;
+
+        // ⭐ A: 화면에 빌드되는 메시지에 대해서만 plan 추출 시도
+        // (가드: in-progress, 캐시 hit, 30일 등 기존 _tryExtractPlan 안에서 처리)
+        // → cacheExtent 1000px 안에 있는 메시지만 호출됨
+        _tryExtractPlan(msg);
+
         final isMe = msg.senderId == _myId;
         final isHighlighted = _searchMode &&
             _searchQuery.isNotEmpty &&

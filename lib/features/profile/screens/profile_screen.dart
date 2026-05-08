@@ -83,21 +83,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     final userId   = supabase.auth.currentUser!.id;
 
     try {
-      // 닉네임 중복 확인
-      final existing = await supabase
-          .from('kyorangtalk_profiles')
-          .select('id')
-          .eq('nickname', nickname)
-          .neq('id', userId)
-          .maybeSingle();
-
-      if (existing != null) {
-        setState(() {
-          _error  = '이미 사용 중인 닉네임이에요';
-          _saving = false;
-        });
-        return;
-      }
+      // ⭐ 닉네임 중복 체크 제거: 동명이인 허용
 
       final status = _statusController.text.trim();
       await supabase.from('kyorangtalk_profiles').upsert({

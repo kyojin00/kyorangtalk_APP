@@ -16,36 +16,35 @@ const int kMoreMessageLimit = 50;     // "더 불러오기" 시 가져올 수
 
 // ═══════════════════════════════════════════════
 // 페이지네이션 컨트롤러 (방별로 메시지 캐시 + 갱신)
-// 화면이 loadOlderMessages 호출 → 컨트롤러가 캐시에 추가 →
-// StreamController에 새 리스트 emit
 // ═══════════════════════════════════════════════
 class _RoomMessageController {
   final String roomId;
   final StreamController<List<MessageModel>> stream;
   List<MessageModel> messages = [];
-  bool hasMore = true;        // 더 가져올 메시지가 있는지
-  bool isLoadingMore = false; // 중복 호출 방지
+  bool hasMore = true;
+  bool isLoadingMore = false;
 
   _RoomMessageController(this.roomId, this.stream);
 
   void emit() {
     if (!stream.isClosed) {
-      // 시간순 정렬 보장
       messages.sort((a, b) => a.createdAt.compareTo(b.createdAt));
       stream.add(List.unmodifiable(messages));
     }
   }
 }
 
-// 방별 활성 컨트롤러 (provider 살아있는 동안 유지)
 final Map<String, _RoomMessageController> _activeControllers = {};
 
-// ── 채팅 목록 (실시간) ──
+// ═══════════════════════════════════════════════
+// 채팅 목록 (실시간) ⭐ 최적화
+// ═══════════════════════════════════════════════
 final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
   final user = _supabase.auth.currentUser!;
   final controller = StreamController<List<ChatRoomModel>>();
 
   Future<List<ChatRoomModel>> fetchRooms() async {
+    // 1) rooms 먼저 (partnerIds, roomIds를 알아야 다음 쿼리 가능)
     final rooms = await _supabase
         .from('kyorangtalk_rooms')
         .select('*')
@@ -67,36 +66,44 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
           : r['user1_id'] as String;
     }).toList();
 
-    final profiles = await _supabase
-        .from('kyorangtalk_profiles')
-        .select('id, nickname, avatar_url')
-        .inFilter('id', partnerIds);
+    final roomIds =
+        visibleRooms.map((r) => r['id'] as String).toList();
+
+    // 2) ⭐ 3개 쿼리 병렬 실행 (profiles, subProfiles, unread)
+    final results = await Future.wait([
+      _supabase
+          .from('kyorangtalk_profiles')
+          .select('id, nickname, avatar_url')
+          .inFilter('id', partnerIds),
+      _supabase
+          .from('kyorangtalk_sub_profiles')
+          .select('''
+            user_id, nickname, avatar_url,
+            kyorangtalk_sub_profile_viewers!inner(viewer_id)
+          ''')
+          .inFilter('user_id', partnerIds)
+          .eq('kyorangtalk_sub_profile_viewers.viewer_id', user.id),
+      _supabase
+          .from('kyorangtalk_messages')
+          .select('room_id')
+          .inFilter('room_id', roomIds)
+          .eq('is_read', false)
+          .neq('sender_id', user.id),
+    ]);
+
+    final profiles    = results[0] as List;
+    final subProfiles = results[1] as List;
+    final unreadList  = results[2] as List;
 
     final profileMap = {
       for (final p in profiles) p['id'] as String: p
     };
 
-    final subProfiles = await _supabase
-        .from('kyorangtalk_sub_profiles')
-        .select('''
-          user_id, nickname, avatar_url,
-          kyorangtalk_sub_profile_viewers!inner(viewer_id)
-        ''')
-        .inFilter('user_id', partnerIds)
-        .eq('kyorangtalk_sub_profile_viewers.viewer_id', user.id);
-
     final subProfileMap = <String, Map<String, dynamic>>{};
     for (final sp in subProfiles) {
-      subProfileMap[sp['user_id'] as String] = sp;
+      subProfileMap[sp['user_id'] as String] =
+          sp as Map<String, dynamic>;
     }
-
-    final unreadList = await _supabase
-        .from('kyorangtalk_messages')
-        .select('room_id')
-        .inFilter('room_id',
-            visibleRooms.map((r) => r['id'] as String).toList())
-        .eq('is_read', false)
-        .neq('sender_id', user.id);
 
     final unreadMap = <String, int>{};
     for (final m in unreadList) {
@@ -109,10 +116,12 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
           ? r['user2_id'] as String
           : r['user1_id'] as String;
       final mainProf = profileMap[partnerId];
-      final subProf = subProfileMap[partnerId];
+      final subProf  = subProfileMap[partnerId];
 
       final nickname = subProf != null
-          ? (subProf['nickname'] as String? ?? mainProf?['nickname'] as String? ?? '알 수 없음')
+          ? (subProf['nickname'] as String? ??
+              mainProf?['nickname'] as String? ??
+              '알 수 없음')
           : (mainProf?['nickname'] as String? ?? '알 수 없음');
 
       final avatarUrl = subProf != null
@@ -136,55 +145,47 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
     }).toList();
   }
 
+  // ⭐ debounce: 짧은 시간 내 여러 트리거를 한 번으로 합침
+  Timer? refetchTimer;
+  void scheduleRefetch() {
+    refetchTimer?.cancel();
+    refetchTimer = Timer(const Duration(milliseconds: 300), () {
+      fetchRooms().then((data) {
+        if (!controller.isClosed) controller.add(data);
+      }).catchError((e) {
+        print('🔴 chatRooms refetch 실패: $e');
+      });
+    });
+  }
+
+  // 초기 로드
   fetchRooms().then((data) {
     if (!controller.isClosed) controller.add(data);
+  }).catchError((e) {
+    print('🔴 chatRooms 초기 로드 실패: $e');
   });
 
+  // ⭐ rooms 테이블만 구독
+  // (sendMessage가 항상 rooms.last_message_at을 갱신하므로
+  //  messages 구독 없이도 새 메시지 도착이 잡힘)
   final channel = _supabase
       .channel('chat_rooms_${user.id}')
       .onPostgresChanges(
         event: PostgresChangeEvent.update,
         schema: 'public',
         table: 'kyorangtalk_rooms',
-        callback: (_) {
-          fetchRooms().then((data) {
-            if (!controller.isClosed) controller.add(data);
-          });
-        },
+        callback: (_) => scheduleRefetch(),
       )
       .onPostgresChanges(
         event: PostgresChangeEvent.insert,
         schema: 'public',
         table: 'kyorangtalk_rooms',
-        callback: (_) {
-          fetchRooms().then((data) {
-            if (!controller.isClosed) controller.add(data);
-          });
-        },
-      )
-      .onPostgresChanges(
-        event: PostgresChangeEvent.insert,
-        schema: 'public',
-        table: 'kyorangtalk_messages',
-        callback: (_) {
-          fetchRooms().then((data) {
-            if (!controller.isClosed) controller.add(data);
-          });
-        },
-      )
-      .onPostgresChanges(
-        event: PostgresChangeEvent.update,
-        schema: 'public',
-        table: 'kyorangtalk_messages',
-        callback: (_) {
-          fetchRooms().then((data) {
-            if (!controller.isClosed) controller.add(data);
-          });
-        },
+        callback: (_) => scheduleRefetch(),
       )
       .subscribe();
 
   ref.onDispose(() {
+    refetchTimer?.cancel();
     _supabase.removeChannel(channel);
     controller.close();
   });
@@ -194,22 +195,18 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
 
 // ═══════════════════════════════════════════════
 // 메시지 목록 (페이지네이션 + 실시간)
-// 처음에 최근 50개만 로드 → 위로 스크롤 시 loadOlderMessages 호출
 // ═══════════════════════════════════════════════
 final messagesProvider =
     StreamProvider.autoDispose.family<List<MessageModel>, String>((ref, roomId) {
   final user = _supabase.auth.currentUser!;
   final streamController = StreamController<List<MessageModel>>();
 
-  // 컨트롤러 등록
   final ctrl = _RoomMessageController(roomId, streamController);
   _activeControllers[roomId] = ctrl;
 
   print('🔵 messagesProvider 시작: $roomId, currentOpenRoomId=$currentOpenRoomId');
 
-  // ─────────────────────────────────────────
   // 1. 초기 로드: 최근 N개만
-  // ─────────────────────────────────────────
   _supabase
       .from('kyorangtalk_messages')
       .select('*')
@@ -233,9 +230,7 @@ final messagesProvider =
     }
   });
 
-  // ─────────────────────────────────────────
-  // 2. 실시간 구독
-  // ─────────────────────────────────────────
+  // 2. 실시간 구독 (room_id 필터로 해당 방 메시지만)
   final channel = _supabase
       .channel('messages_$roomId')
       .onPostgresChanges(
@@ -281,7 +276,8 @@ final messagesProvider =
           final isRead = updated['is_read'] as bool? ?? false;
           final isDeleted = updated['is_deleted'] as bool? ?? false;
           final transcript = updated['audio_transcript'] as String?;
-          final transcriptStatus = updated['audio_transcript_status'] as String?;
+          final transcriptStatus =
+              updated['audio_transcript_status'] as String?;
           if (id == null) return;
           ctrl.messages = ctrl.messages.map((m) {
             if (m.id == id) {
@@ -310,10 +306,6 @@ final messagesProvider =
 
 // ═══════════════════════════════════════════════
 // 더 오래된 메시지 가져오기 (페이지네이션)
-//
-// Returns:
-//   - true: 더 가져왔음 (UI에서 스크롤 위치 유지 등 처리)
-//   - false: 더 이상 없음, 또는 이미 로드 중, 또는 컨트롤러 없음
 // ═══════════════════════════════════════════════
 Future<bool> loadOlderMessages(String roomId) async {
   final ctrl = _activeControllers[roomId];
@@ -336,7 +328,6 @@ Future<bool> loadOlderMessages(String roomId) async {
 
   ctrl.isLoadingMore = true;
   try {
-    // 시간순 정렬되어 있으니 첫 메시지가 가장 오래된 것
     final oldestTime = ctrl.messages.first.createdAt;
     print('🔵 [Pagination] 로드: roomId=$roomId, before=$oldestTime');
 
@@ -356,9 +347,9 @@ Future<bool> loadOlderMessages(String roomId) async {
       return false;
     }
 
-    // 중복 제거 + 합치기
     final existingIds = ctrl.messages.map((m) => m.id).toSet();
-    final newOnes = older.where((m) => !existingIds.contains(m.id)).toList();
+    final newOnes =
+        older.where((m) => !existingIds.contains(m.id)).toList();
 
     ctrl.messages = [...newOnes, ...ctrl.messages];
     ctrl.hasMore = older.length >= kMoreMessageLimit;
@@ -378,14 +369,14 @@ bool hasMoreMessages(String roomId) {
 }
 
 // ═══════════════════════════════════════════════
-// 메시지 전송 (⭐ imageUrls 파라미터 추가)
+// 메시지 전송
 // ═══════════════════════════════════════════════
 Future<void> sendMessage({
   required String myId,
   required String roomId,
   required String content,
   String? imageUrl,
-  List<String>? imageUrls,             // ⭐ NEW: 다중 이미지
+  List<String>? imageUrls,
   String? audioUrl,
   int? audioDuration,
   String? replyToId,
@@ -405,10 +396,10 @@ Future<void> sendMessage({
     'is_deleted': false,
     if (imageUrl != null)               'image_url':        imageUrl,
     if (imageUrls != null && imageUrls.isNotEmpty)
-                                        'image_urls':       imageUrls,   // ⭐ NEW
+                                        'image_urls':       imageUrls,
     if (audioUrl != null)               'audio_url':        audioUrl,
     if (audioDuration != null)          'audio_duration':   audioDuration,
-    if (replyToId != null)              'reply_to_id':      replyToId,
+    if (replyToId != null)               'reply_to_id':      replyToId,
     if (replyToContent != null)         'reply_to_content': replyToContent,
     if (gameData != null)               'game_data':        gameData,
     if (pollId != null)                 'poll_id':          pollId,
@@ -418,7 +409,6 @@ Future<void> sendMessage({
     if (fileType != null)               'file_type':        fileType,
   });
 
-  // ⭐ 마지막 메시지 텍스트 (다중 이미지 케이스 추가)
   String lastMessageText;
   if (fileUrl != null) {
     lastMessageText = '📎 ${fileName ?? "파일"}';
@@ -429,8 +419,9 @@ Future<void> sendMessage({
   } else if (audioUrl != null) {
     lastMessageText = '[음성 메시지]';
   } else if (imageUrls != null && imageUrls.length >= 2) {
-    lastMessageText = '[사진 ${imageUrls.length}장]';   // ⭐ NEW
-  } else if (imageUrl != null || (imageUrls != null && imageUrls.isNotEmpty)) {
+    lastMessageText = '[사진 ${imageUrls.length}장]';
+  } else if (imageUrl != null ||
+      (imageUrls != null && imageUrls.isNotEmpty)) {
     lastMessageText = '[이미지]';
   } else {
     lastMessageText = content.trim();
