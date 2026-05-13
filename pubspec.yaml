@@ -1,7 +1,7 @@
 name: kyorang_talk
 description: 교랑톡 - 교랑 채팅 앱
 publish_to: 'none'
-version: 1.0.0+2
+version: 1.0.0+4
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -19,6 +19,7 @@ dependencies:
   google_sign_in: ^6.2.1
   # UI
   cached_network_image: ^3.3.1
+  google_fonts: ^6.2.1            # ⭐ NEW — 세리프 폰트용 (스플래시 등)
   # 유틸
   shared_preferences: ^2.2.3
   intl: ^0.19.0
@@ -46,6 +47,10 @@ dependencies:
   share_plus: ^10.0.0
   app_links: ^6.3.0
   html: ^0.15.4
+  agora_rtc_engine: ^6.5.0
+  flutter_callkit_incoming: ^2.5.2
+  sentry_flutter: ^9.20.0
+  in_app_purchase: ^3.2.0
 
 
 dev_dependencies:

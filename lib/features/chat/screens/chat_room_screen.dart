@@ -14,7 +14,6 @@ import '../models/chat_room_model.dart';
 import '../models/message_model.dart';
 import '../providers/chat_provider.dart';
 import '../providers/reaction_provider.dart';
-import '../services/plan_service.dart';
 import '../services/pending_message_store.dart';
 import '../services/draft_store.dart';
 import 'multi_image_viewer_screen.dart';
@@ -34,9 +33,6 @@ import '../widgets/chat_room_sheets.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/chat_pinned_reply.dart';
 import '../widgets/reaction_picker_bar.dart';
-import '../widgets/summary_banner.dart';
-import '../widgets/smart_reply_bar.dart';
-import '../widgets/plan_card_widget.dart';
 import '../widgets/failed_message_bubble.dart';
 import '../../polls/widgets/create_poll_sheet.dart';
 
@@ -65,16 +61,8 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   String? _pinnedMessage;
   bool _isMuted = false;
   bool _disposed = false;
-  bool _summaryDismissed = false;
 
-  // ⭐ Summary 활성화 임계값 (D)
-  static const int kSummaryMinUnread = 5;
-
-  String? _smartReplyDismissedFor;
   bool _inputIsEmpty = true;
-
-  final Map<String, PlanModel> _detectedPlans = <String, PlanModel>{};
-  final Set<String> _planExtractInProgress = <String>{};
 
   bool _isPaginating = false;
   bool _noMoreMessages = false;
@@ -93,18 +81,14 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   List<MessageModel>? _lastMessages;
   List<MessageGroup> _cachedGroups = [];
 
-  // ⭐ 캐싱 (C): build 안에서 매번 정렬/필터하지 않도록
   List<MessageModel> _sortedMessages = const [];
-  List<String> _recentContextCache = const [];
 
-  // 실패한 메시지 (영구 저장)
   List<PendingMessage> _failedMessages = [];
   final Set<String> _retryingIds = <String>{};
 
-  // Draft 자동 저장용 디바운서
-  Timer? _draftSaveDebouncer;
+  final Map<String, _OptimisticMessage> _optimisticMessages = {};
 
-  // ⭐ markAllRead debounce (B)
+  Timer? _draftSaveDebouncer;
   Timer? _markReadDebouncer;
 
   bool get _isStatusLoaded =>
@@ -117,10 +101,7 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     super.initState();
     currentOpenRoomId = widget.room.roomId;
     _pinnedMessage = widget.room.pinnedMessage;
-
-    // 진입 시 첫 호출은 즉시 (그 이후는 debounce)
     _markAllRead();
-
     _loadMuteStatus();
     _loadAllStatus();
     _listenBlockChanges();
@@ -379,11 +360,9 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           .eq('room_id', widget.room.roomId)
           .neq('sender_id', _myId)
           .eq('is_read', false);
-      if (!_disposed && mounted) ref.invalidate(chatRoomsProvider);
     } catch (_) {}
   }
 
-  // ⭐ B: debounce 적용된 호출
   void _scheduleMarkAllRead() {
     _markReadDebouncer?.cancel();
     _markReadDebouncer = Timer(const Duration(seconds: 1), () {
@@ -406,56 +385,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           .subscribe();
     } catch (_) {}
   }
-
-  Future<void> _tryExtractPlan(MessageModel msg) async {
-    if (_disposed) return;
-    if (msg.isDeleted) return;
-    if (msg.imageUrl != null ||
-        msg.isMultiImageMessage ||
-        msg.fileUrl != null ||
-        msg.gameData != null ||
-        msg.pollId != null) return;
-
-    final text = msg.audioUrl != null
-        ? (msg.audioTranscript ?? '')
-        : msg.content;
-    if (text.trim().length < 10) return;
-
-    if (_planExtractInProgress.contains(msg.id)) return;
-    if (_detectedPlans.containsKey(msg.id)) return;
-
-    _planExtractInProgress.add(msg.id);
-
-    try {
-      final cached = await PlanService.fetchByMessageId(msg.id);
-      if (cached != null) {
-        if (!_disposed && mounted && !cached.isDismissed) {
-          setState(() => _detectedPlans[msg.id] = cached);
-        }
-        return;
-      }
-
-      final senderName = msg.senderId == _myId ? '나' : widget.room.partnerName;
-      final plan = await PlanService.extractFromMessage(
-        roomId: widget.room.roomId,
-        isGroup: false,
-        messageId: msg.id,
-        messageText: text,
-        senderName: senderName,
-        context: _recentContextCache,
-      );
-
-      if (plan != null && !_disposed && mounted) {
-        setState(() => _detectedPlans[msg.id] = plan);
-      }
-    } finally {
-      _planExtractInProgress.remove(msg.id);
-    }
-  }
-
-  // ⭐ A: 입장 시 30개 한꺼번에 추출하는 함수 제거됨.
-  //       대신 itemBuilder가 화면에 빌드할 때만 _tryExtractPlan 호출.
-  //       (캐시 히트면 즉시, 미스면 백그라운드 1건만)
 
   Future<void> _sendFriendRequest() async {
     if (_friendRequestSending) return;
@@ -503,7 +432,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           _isBlocked = true;
           _friendStatus = 'none';
         });
-        ref.invalidate(chatRoomsProvider);
         ref.invalidate(friendsProvider);
         _showSnack('${widget.room.partnerName}님을 차단했어요');
       }
@@ -524,7 +452,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           .eq('blocked_id', widget.room.partnerId);
       if (!_disposed && mounted) {
         setState(() => _isBlocked = false);
-        ref.invalidate(chatRoomsProvider);
         _showSnack('${widget.room.partnerName}님의 차단을 해제했어요');
       }
     } catch (e) {
@@ -591,71 +518,12 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     });
   }
 
-  // ⭐ C: 캐시된 정렬 결과 반환 (build 안에서 매번 sort 안 함)
   List<MessageModel> _getSortedMessages() => _sortedMessages;
 
-  // ⭐ C: 캐시된 컨텍스트 반환
-  List<String> _getRecentMessagesForContext() => _recentContextCache;
-
-  // ⭐ ref.listen에서 메시지 변경 시 한 번만 정렬/필터
   void _updateMessageCaches(List<MessageModel> msgs) {
     final sorted = [...msgs]
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
     _sortedMessages = sorted;
-
-    // 최근 5개 텍스트 메시지로 컨텍스트 구성
-    final recent = sorted.reversed
-        .where((m) =>
-            !m.isDeleted &&
-            !m.isImageMessage &&
-            m.audioUrl == null &&
-            m.fileUrl == null &&
-            m.gameData == null &&
-            m.pollId == null &&
-            m.content.trim().isNotEmpty)
-        .take(5)
-        .toList()
-        .reversed
-        .toList();
-
-    _recentContextCache = recent.map((m) {
-      final speaker =
-          m.senderId == _myId ? '나' : widget.room.partnerName;
-      return '$speaker: ${m.content}';
-    }).toList();
-  }
-
-  // ⭐ C: build에서 시간 조건만 평가, 정렬은 안 함
-  MessageModel? _computeSmartReplyTarget() {
-    if (!_inputIsEmpty) return null;
-    if (_sortedMessages.isEmpty) return null;
-
-    final last = _sortedMessages.last;
-
-    if (last.senderId == _myId) return null;
-    if (last.isDeleted) return null;
-    if (_smartReplyDismissedFor == last.id) return null;
-
-    final diff = DateTime.now().difference(last.createdAt);
-    if (diff.inMinutes >= 1) return null;
-
-    final hasText = last.audioUrl != null
-        ? (last.audioTranscript?.isNotEmpty ?? false)
-        : (!last.isImageMessage &&
-            last.fileUrl == null &&
-            last.gameData == null &&
-            last.pollId == null &&
-            last.content.trim().isNotEmpty);
-    if (!hasText) return null;
-
-    return last;
-  }
-
-  String _getSmartReplyText(MessageModel msg) {
-    if (msg.audioUrl != null && msg.audioTranscript != null) {
-      return msg.audioTranscript!;
-    }
-    return msg.content;
   }
 
   Future<void> _handleAttachment() async {
@@ -822,25 +690,30 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
 
   Future<void> _send() async {
     final content = _inputController.text.trim();
-    if (content.isEmpty || _sending) return;
+    if (content.isEmpty) return;
     if (_isBlocked == true || _isBlockedByPartner == true) return;
 
     final reply = _replyTo;
+    final localId = PendingMessageStore.generateLocalId();
+    final now = DateTime.now();
 
-    final pending = PendingMessage(
-      id: PendingMessageStore.generateLocalId(),
-      roomId: widget.room.roomId,
-      isGroup: false,
+    final optimistic = _OptimisticMessage(
+      localId: localId,
       content: content,
       replyToId: reply?.id,
       replyToContent: reply?.content,
-      createdAt: DateTime.now(),
+      createdAt: now,
     );
 
     _inputController.clear();
-    setState(() => _replyTo = null);
-
     DraftStore.clear(roomId: widget.room.roomId, isGroup: false);
+
+    setState(() {
+      _replyTo = null;
+      _optimisticMessages[localId] = optimistic;
+    });
+
+    _animateToBottom();
 
     try {
       await sendMessage(
@@ -850,18 +723,29 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
         replyToId: reply?.id,
         replyToContent: reply?.content,
       );
+
       if (!_disposed && mounted) {
-        ref.invalidate(messagesProvider(widget.room.roomId));
-        ref.invalidate(chatRoomsProvider);
+        setState(() => _optimisticMessages.remove(localId));
       }
-      _animateToBottom();
     } catch (e) {
       if (_disposed) return;
-      final failed = pending.copyWith(errorMessage: e.toString());
+      final failed = PendingMessage(
+        id: localId,
+        roomId: widget.room.roomId,
+        isGroup: false,
+        content: content,
+        replyToId: reply?.id,
+        replyToContent: reply?.content,
+        createdAt: now,
+        errorMessage: e.toString(),
+      );
       await PendingMessageStore.upsert(failed);
+
       if (mounted) {
-        setState(() => _failedMessages = [..._failedMessages, failed]);
-        _animateToBottom();
+        setState(() {
+          _optimisticMessages.remove(localId);
+          _failedMessages = [..._failedMessages, failed];
+        });
       }
     }
   }
@@ -889,8 +773,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           _failedMessages.removeWhere((m) => m.id == msg.id);
           _retryingIds.remove(msg.id);
         });
-        ref.invalidate(messagesProvider(widget.room.roomId));
-        ref.invalidate(chatRoomsProvider);
         _animateToBottom();
       }
     } catch (e) {
@@ -952,8 +834,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           imageUrl: url,
         );
         if (!_disposed && mounted) {
-          ref.invalidate(messagesProvider(widget.room.roomId));
-          ref.invalidate(chatRoomsProvider);
           setState(() => _sending = false);
           _animateToBottom();
         }
@@ -991,11 +871,7 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
         content: urls.length == 1 ? '[이미지]' : '[이미지 ${urls.length}장]',
         imageUrls: urls,
       );
-      if (!_disposed && mounted) {
-        ref.invalidate(messagesProvider(widget.room.roomId));
-        ref.invalidate(chatRoomsProvider);
-        _animateToBottom();
-      }
+      if (!_disposed && mounted) _animateToBottom();
     } catch (e) {
       if (mounted) _showSnack('이미지 전송 실패: $e');
     }
@@ -1032,7 +908,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     if (!ok) return;
     await hideChatRoom(widget.room.roomId);
     if (!_disposed && mounted) {
-      ref.invalidate(chatRoomsProvider);
       Navigator.pop(context);
     }
   }
@@ -1274,12 +1149,10 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       next.whenData((msgs) {
         if (_disposed) return;
 
-        // ⭐ C: 메시지 변경 시점에 한 번만 정렬/컨텍스트 갱신
         _updateMessageCaches(msgs);
 
         if (prev?.value == null) {
           _forceScrollToBottom();
-          // ⭐ A: 입장 시 30개 일괄 추출 안 함. itemBuilder가 처리.
           return;
         }
 
@@ -1288,6 +1161,30 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
             msgs.where((m) => !prevIds.contains(m.id)).toList();
 
         if (newMessages.isNotEmpty) {
+          if (_optimisticMessages.isNotEmpty) {
+            final myNewMessages =
+                newMessages.where((m) => m.senderId == _myId).toList();
+            if (myNewMessages.isNotEmpty) {
+              setState(() {
+                for (final newMsg in myNewMessages) {
+                  final matchKey = _optimisticMessages.entries
+                      .where((e) =>
+                          e.value.content == newMsg.content &&
+                          newMsg.createdAt
+                                  .difference(e.value.createdAt)
+                                  .inSeconds
+                                  .abs() <
+                              30)
+                      .map((e) => e.key)
+                      .firstOrNull;
+                  if (matchKey != null) {
+                    _optimisticMessages.remove(matchKey);
+                  }
+                }
+              });
+            }
+          }
+
           final sortedNew = [...newMessages]
             ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
           final latestNew = sortedNew.last;
@@ -1305,23 +1202,12 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           }
           final unread =
               msgs.where((m) => m.senderId != _myId && !m.isRead).toList();
-          // ⭐ B: 매번 즉시 호출 → debounce 1초
           if (unread.isNotEmpty) _scheduleMarkAllRead();
-
-          // 새 메시지만 plan 추출 시도 (1건씩)
-          for (final msg in newMessages) {
-            _tryExtractPlan(msg);
-          }
         }
       });
     });
 
     final isAnyBlocked = _isBlocked == true || _isBlockedByPartner == true;
-    final smartReplyTarget = _computeSmartReplyTarget();
-
-    // ⭐ D: SummaryBanner는 unread가 임계값 이상일 때만
-    final showSummary = !_summaryDismissed &&
-        widget.room.unreadCount >= kSummaryMinUnread;
 
     return Scaffold(
       backgroundColor: AppTheme.bg,
@@ -1335,15 +1221,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
               PinnedMessageBanner(
                 pinnedMessage: _pinnedMessage!,
                 onUnpin: _unpinMessage,
-              ),
-
-            if (showSummary)
-              SummaryBanner(
-                roomId: widget.room.roomId,
-                isGroup: false,
-                unreadCount: widget.room.unreadCount,
-                onDismiss: () =>
-                    setState(() => _summaryDismissed = true),
               ),
 
             Expanded(
@@ -1381,40 +1258,15 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
                   partnerName: widget.room.partnerName,
                   onUnblock: _isBlocked == true ? _unblockUser : null,
                 )
-              else ...[
-                if (smartReplyTarget != null)
-                  SmartReplyBar(
-                    key: ValueKey('smart_reply_${smartReplyTarget.id}'),
-                    roomId: widget.room.roomId,
-                    isGroup: false,
-                    lastMessageId: smartReplyTarget.id,
-                    lastMessageText: _getSmartReplyText(smartReplyTarget),
-                    senderName: widget.room.partnerName,
-                    contextMessages: _getRecentMessagesForContext(),
-                    onSelected: (text) {
-                      _inputController.text = text;
-                      _inputController.selection =
-                          TextSelection.fromPosition(
-                        TextPosition(offset: text.length),
-                      );
-                      _focusNode.requestFocus();
-                      setState(() =>
-                          _smartReplyDismissedFor = smartReplyTarget.id);
-                    },
-                    onDismiss: () {
-                      setState(() =>
-                          _smartReplyDismissedFor = smartReplyTarget.id);
-                    },
-                  ),
+              else
                 ChatInputBar(
                   controller: _inputController,
                   focusNode: _focusNode,
                   enabled: true,
-                  sending: _sending,
+                  sending: false,
                   onAttachment: _handleAttachment,
                   onSend: _send,
                 ),
-              ],
           ],
         ),
       ),
@@ -1514,7 +1366,9 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   }
 
   Widget _buildMessageList(List<MessageModel> messages) {
-    if (messages.isEmpty && _failedMessages.isEmpty) {
+    if (messages.isEmpty &&
+        _failedMessages.isEmpty &&
+        _optimisticMessages.isEmpty) {
       return EmptyChatState(partnerName: widget.room.partnerName);
     }
 
@@ -1538,6 +1392,14 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       items.add(_ListItem.dateDivider(group.label));
       for (final msg in group.items) {
         items.add(_ListItem.message(msg));
+      }
+    }
+
+    if (_optimisticMessages.isNotEmpty) {
+      final sortedOptimistic = _optimisticMessages.values.toList()
+        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      for (final o in sortedOptimistic) {
+        items.add(_ListItem.optimistic(o));
       }
     }
 
@@ -1606,6 +1468,17 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
           return DateDivider(label: item.dateLabel!);
         }
 
+        if (item.isOptimistic) {
+          final o = item.optimistic!;
+          return RepaintBoundary(
+            key: ValueKey('opt_${o.localId}'),
+            child: _OptimisticBubble(
+              content: o.content,
+              timeStr: _timeStr(o.createdAt),
+            ),
+          );
+        }
+
         if (item.isFailedMessage) {
           final f = item.failedMessage!;
           return RepaintBoundary(
@@ -1621,12 +1494,6 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
         }
 
         final msg = item.message!;
-
-        // ⭐ A: 화면에 빌드되는 메시지에 대해서만 plan 추출 시도
-        // (가드: in-progress, 캐시 hit, 30일 등 기존 _tryExtractPlan 안에서 처리)
-        // → cacheExtent 1000px 안에 있는 메시지만 호출됨
-        _tryExtractPlan(msg);
-
         final isMe = msg.senderId == _myId;
         final isHighlighted = _searchMode &&
             _searchQuery.isNotEmpty &&
@@ -1634,78 +1501,132 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
                 .toLowerCase()
                 .contains(_searchQuery.toLowerCase());
 
-        final detectedPlan = _detectedPlans[msg.id];
-
         return RepaintBoundary(
           key: ValueKey('msg_${msg.id}'),
-          child: Column(
-            crossAxisAlignment: isMe
-                ? CrossAxisAlignment.end
-                : CrossAxisAlignment.start,
-            children: [
-              GestureDetector(
-                key: _getKeyFor(msg.id),
-                onLongPress: () => _handleMessageOptions(msg),
-                child: MessageBubble(
-                  msg: msg,
-                  roomId: widget.room.roomId,
-                  isMe: isMe,
-                  timeStr: _timeStr(msg.createdAt),
-                  isHighlighted: isHighlighted,
-                  searchQuery: _searchQuery,
-                  partnerName: widget.room.partnerName,
-                  partnerAvatar: widget.room.partnerAvatar,
-                  onImageLoad: () {
-                    if (_disposed) return;
-                    if (_isNearBottom()) _jumpToBottom();
-                  },
-                  onImageTap: (url) {
-                    final allUrls = msg.allImageUrls;
-                    final initialIndex =
-                        allUrls.indexOf(url).clamp(0, allUrls.length - 1);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => MultiImageViewerScreen(
-                          imageUrls: allUrls.isEmpty ? [url] : allUrls,
-                          initialIndex: initialIndex < 0 ? 0 : initialIndex,
-                          senderName: isMe ? '나' : widget.room.partnerName,
-                          time: _timeStr(msg.createdAt),
-                        ),
-                      ),
-                    );
-                  },
-                  onAvatarTap: isMe ? null : _openPartnerProfile,
-                ),
-              ),
-
-              if (detectedPlan != null) ...[
-                const SizedBox(height: 4),
-                Padding(
-                  padding: EdgeInsets.only(
-                    left: isMe ? 40 : 36,
-                    right: isMe ? 4 : 40,
-                    bottom: 4,
+          child: GestureDetector(
+            key: _getKeyFor(msg.id),
+            onLongPress: () => _handleMessageOptions(msg),
+            child: MessageBubble(
+              msg: msg,
+              roomId: widget.room.roomId,
+              isMe: isMe,
+              timeStr: _timeStr(msg.createdAt),
+              isHighlighted: isHighlighted,
+              searchQuery: _searchQuery,
+              partnerName: widget.room.partnerName,
+              partnerAvatar: widget.room.partnerAvatar,
+              onImageLoad: () {
+                if (_disposed) return;
+                if (_isNearBottom()) _jumpToBottom();
+              },
+              onImageTap: (url) {
+                final allUrls = msg.allImageUrls;
+                final initialIndex =
+                    allUrls.indexOf(url).clamp(0, allUrls.length - 1);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => MultiImageViewerScreen(
+                      imageUrls: allUrls.isEmpty ? [url] : allUrls,
+                      initialIndex: initialIndex < 0 ? 0 : initialIndex,
+                      senderName: isMe ? '나' : widget.room.partnerName,
+                      time: _timeStr(msg.createdAt),
+                    ),
                   ),
-                  child: PlanCard(
-                    plan: detectedPlan,
-                    onDismissed: () {
-                      if (!_disposed && mounted) {
-                        setState(() => _detectedPlans.remove(msg.id));
-                      }
-                    },
-                    onUpdated: (updated) {
-                      if (!_disposed && mounted) {
-                        setState(() => _detectedPlans[msg.id] = updated);
-                      }
-                    },
-                  ),
-                ),
-              ],
-            ],
+                );
+              },
+              onAvatarTap: isMe ? null : _openPartnerProfile,
+            ),
           ),
         );
       },
+    );
+  }
+}
+
+class _OptimisticMessage {
+  final String localId;
+  final String content;
+  final String? replyToId;
+  final String? replyToContent;
+  final DateTime createdAt;
+
+  _OptimisticMessage({
+    required this.localId,
+    required this.content,
+    this.replyToId,
+    this.replyToContent,
+    required this.createdAt,
+  });
+}
+
+class _OptimisticBubble extends StatelessWidget {
+  final String content;
+  final String timeStr;
+
+  const _OptimisticBubble({
+    required this.content,
+    required this.timeStr,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(right: 6, bottom: 2),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.schedule,
+                  size: 11,
+                  color: AppTheme.textMuted,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  timeStr,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: AppTheme.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Flexible(
+            child: Opacity(
+              opacity: 0.65,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: AppTheme.primary,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(16),
+                    topRight: Radius.circular(16),
+                    bottomLeft: Radius.circular(16),
+                    bottomRight: Radius.circular(4),
+                  ),
+                ),
+                child: Text(
+                  content,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1714,24 +1635,35 @@ class _ListItem {
   final String? dateLabel;
   final MessageModel? message;
   final PendingMessage? failedMessage;
+  final _OptimisticMessage? optimistic;
   final bool isLoadingIndicator;
   final bool isStartOfChatMarker;
 
   _ListItem.dateDivider(this.dateLabel)
       : message = null,
         failedMessage = null,
+        optimistic = null,
         isLoadingIndicator = false,
         isStartOfChatMarker = false;
 
   _ListItem.message(this.message)
       : dateLabel = null,
         failedMessage = null,
+        optimistic = null,
         isLoadingIndicator = false,
         isStartOfChatMarker = false;
 
   _ListItem.failedMessage(this.failedMessage)
       : dateLabel = null,
         message = null,
+        optimistic = null,
+        isLoadingIndicator = false,
+        isStartOfChatMarker = false;
+
+  _ListItem.optimistic(this.optimistic)
+      : dateLabel = null,
+        message = null,
+        failedMessage = null,
         isLoadingIndicator = false,
         isStartOfChatMarker = false;
 
@@ -1739,6 +1671,7 @@ class _ListItem {
       : dateLabel = null,
         message = null,
         failedMessage = null,
+        optimistic = null,
         isLoadingIndicator = true,
         isStartOfChatMarker = false;
 
@@ -1746,6 +1679,7 @@ class _ListItem {
       : dateLabel = null,
         message = null,
         failedMessage = null,
+        optimistic = null,
         isLoadingIndicator = false,
         isStartOfChatMarker = true;
 
@@ -1755,4 +1689,5 @@ class _ListItem {
       !isStartOfChatMarker;
 
   bool get isFailedMessage => failedMessage != null;
+  bool get isOptimistic => optimistic != null;
 }

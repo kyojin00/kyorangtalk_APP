@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
+import '../../call/models/call_model.dart';
+import '../../call/widgets/call_button.dart';
 import '../models/chat_room_model.dart';
 import '../models/message_model.dart';
 
@@ -24,13 +26,18 @@ AppBar buildChatAppBar({
   required VoidCallback onBlock,
   required VoidCallback onReport,
   required VoidCallback onNotFriendTap,
-  required VoidCallback onGallery,                                // ⭐ NEW
-  required VoidCallback onMemory,                                 // ⭐ NEW
+  required VoidCallback onGallery,
+  required VoidCallback onMemory,
 }) {
   final showNotFriendBadge = isStatusLoaded &&
       isBlocked == false &&
       isBlockedByPartner == false &&
       friendStatus != 'accepted';
+
+  // ⭐ 통화 가능 조건: 차단 안 됐고 상태 로드 완료
+  final canCall = isStatusLoaded &&
+      isBlocked != true &&
+      isBlockedByPartner != true;
 
   return AppBar(
     backgroundColor: AppTheme.bg,
@@ -77,6 +84,12 @@ AppBar buildChatAppBar({
       ),
     ),
     actions: [
+      // ⭐ 통화 버튼 (차단 상태가 아닐 때만)
+      if (canCall)
+        CallButton(
+          roomType: CallRoomType.dm,
+          sourceRoomId: room.roomId,
+        ),
       IconButton(
         icon: Icon(Icons.search, color: AppTheme.textSub),
         onPressed: onSearchTap,
@@ -95,8 +108,8 @@ AppBar buildChatAppBar({
             case 'add_friend': onAddFriend();  break;
             case 'block':      onBlock();      break;
             case 'report':     onReport();     break;
-            case 'gallery':    onGallery();    break;          // ⭐ NEW
-            case 'memory':     onMemory();     break;          // ⭐ NEW
+            case 'gallery':    onGallery();    break;
+            case 'memory':     onMemory();     break;
           }
         },
         itemBuilder: (_) => _buildMenuItems(

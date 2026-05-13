@@ -31,19 +31,16 @@ android {
 
     defaultConfig {
         applicationId = "com.kyorang.kyorang_talk"
-        minSdk = flutter.minSdkVersion
+        minSdk = maxOf(flutter.minSdkVersion, 21)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
 
     signingConfigs {
-        getByName("debug") {
-            storeFile = file("debug-new.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
-        }
+        // ⭐ debug 사이닝 — debug-new.keystore 손상으로 인해 기본 Android 디버그 키 사용
+        //    Android Gradle Plugin이 자동으로 ~/.android/debug.keystore 사용 또는 생성
+        //    (signingConfigs.getByName("debug") 블록 제거)
 
         // ⭐ release 키스토어 서명
         create("release") {
@@ -70,6 +67,22 @@ android {
             )
         }
     }
+
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/proguard/androidx-annotations.pro",
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/license.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+                "META-INF/notice.txt",
+                "META-INF/ASL2.0"
+            )
+        }
+    }
 }
 
 dependencies {
@@ -80,4 +93,5 @@ flutter {
     source = "../.."
 }
 
+// ⭐ Firebase google-services plugin 적용
 apply(plugin = "com.google.gms.google-services")

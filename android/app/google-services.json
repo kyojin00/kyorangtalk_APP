@@ -22,7 +22,15 @@
           }
         },
         {
-          "client_id": "54388432481-v8n3a8ijv4m5as0kltofu1jn00puu1tc.apps.googleusercontent.com",
+          "client_id": "54388432481-ahmajancbq1nsk7rucv6tvj9f9pcng2c.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kyorang.kyorang_talk",
+            "certificate_hash": "fe4b114e9259df9a170a80eeccc532d2f20c6dfe"
+          }
+        },
+        {
+          "client_id": "54388432481-o5pgtae98r17uaeaqkqdq6uu5ebobnss.apps.googleusercontent.com",
           "client_type": 3
         }
       ],
@@ -35,8 +43,15 @@
         "appinvite_service": {
           "other_platform_oauth_client": [
             {
-              "client_id": "54388432481-v8n3a8ijv4m5as0kltofu1jn00puu1tc.apps.googleusercontent.com",
+              "client_id": "54388432481-o5pgtae98r17uaeaqkqdq6uu5ebobnss.apps.googleusercontent.com",
               "client_type": 3
+            },
+            {
+              "client_id": "54388432481-9nujknbtko75u7108l6qj588ccsq9clt.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.kyorang.kyorangTalk"
+              }
             }
           ]
         }

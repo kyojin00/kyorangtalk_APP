@@ -11,6 +11,28 @@
 -dontwarn io.flutter.embedding.**
 
 # ═══════════════════════════════════════════════════
+# ⭐ Agora RTC SDK (Phase 2-3)
+# ═══════════════════════════════════════════════════
+-keep class io.agora.** { *; }
+-keep class io.agora.rtc.** { *; }
+-keep class io.agora.rtc2.** { *; }
+-keep class io.agora.base.** { *; }
+-keep class io.agora.spatialaudio.** { *; }
+-dontwarn io.agora.**
+
+# Agora native methods (JNI 호출 보존)
+-keepclassmembers class io.agora.** {
+    native <methods>;
+}
+-keepclasseswithmembernames class io.agora.** {
+    native <methods>;
+}
+
+# Agora 콜백 인터페이스
+-keep interface io.agora.rtc.** { *; }
+-keep interface io.agora.rtc2.** { *; }
+
+# ═══════════════════════════════════════════════════
 # Firebase (Crashlytics, Messaging, Analytics 등)
 # ═══════════════════════════════════════════════════
 -keep class com.google.firebase.** { *; }
@@ -77,6 +99,14 @@
 -keepattributes InnerClasses
 
 # ═══════════════════════════════════════════════════
+# ⭐ Kyorang 앱 모델 클래스 (JSON 직렬화 대상 보존)
+# ═══════════════════════════════════════════════════
+-keep class com.kyorang.** { *; }
+-keepclassmembers class com.kyorang.** {
+    *;
+}
+
+# ═══════════════════════════════════════════════════
 # Image picker / file_picker / 기타 plugin
 # ═══════════════════════════════════════════════════
 -keep class androidx.lifecycle.** { *; }
@@ -108,4 +138,15 @@
     private void readObject(java.io.ObjectInputStream);
     java.lang.Object writeReplace();
     java.lang.Object readResolve();
+}
+
+# ═══════════════════════════════════════════════════
+# ⭐ Release 빌드 로그 제거 (선택 - APK 크기 최적화)
+# ═══════════════════════════════════════════════════
+# Log.d / Log.v / Log.i 호출을 release 빌드에서 제거
+# Log.w / Log.e는 유지 (크래시 디버깅용)
+-assumenosideeffects class android.util.Log {
+    public static *** d(...);
+    public static *** v(...);
+    public static *** i(...);
 }

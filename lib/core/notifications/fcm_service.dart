@@ -4,9 +4,28 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'notification_service.dart';
 import '../../features/chat/providers/chat_provider.dart' show currentOpenRoomId;
 import '../../features/group_chat/providers/group_chat_provider.dart' show currentOpenGroupRoomId;
+import '../../features/call/services/call_kit_service.dart';   // ⭐ NEW
 
+// ⭐ 백그라운드 핸들러 — entry point 등록 필수
 @pragma('vm:entry-point')
-Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {}
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  // ⭐ call_invite는 백그라운드에서도 시스템 통화 UI 띄워야 함
+  if (message.data['type'] == 'call_invite') {
+    final invite = CallInvite.fromFcmData(message.data);
+    if (invite.callId.isNotEmpty) {
+      await CallKitService.instance.showIncomingCall(
+        callId:       invite.callId,
+        callerName:   invite.callerName,
+        callerAvatar: invite.callerAvatar,
+        isVideo:      invite.isVideo,
+        roomType:     invite.roomType,
+        sourceRoomId: invite.sourceRoomId,
+        initiatorId:  invite.initiatorId,
+        groupName:    invite.groupName,
+      );
+    }
+  }
+}
 
 typedef OnNotificationTap = void Function(String roomId, String senderId);
 OnNotificationTap? _onNotificationTap;
@@ -153,6 +172,12 @@ class FcmService {
   }
 
   static Future<void> _handleForegroundMessage(RemoteMessage message) async {
+    // ⭐⭐⭐ 통화 초대 처리 (다른 모든 로직보다 먼저)
+    if (message.data['type'] == 'call_invite') {
+      await _handleCallInvite(message.data);
+      return;
+    }
+
     final notification = message.notification;
     final roomId      = message.data['room_id']       ?? '';
     final groupRoomId = message.data['group_room_id'] ?? '';
@@ -240,7 +265,57 @@ class FcmService {
     );
   }
 
+  // ⭐ 통화 초대 FCM 처리
+  static Future<void> _handleCallInvite(Map<String, dynamic> data) async {
+    final invite = CallInvite.fromFcmData(data);
+    if (invite.callId.isEmpty) {
+      print('🔴 통화 초대: call_id 없음');
+      return;
+    }
+
+    // 차단 확인 (서버에서도 체크하지만 클라이언트에서도 한 번 더)
+    try {
+      final supabase = Supabase.instance.client;
+      final myId = supabase.auth.currentUser?.id;
+      if (myId != null) {
+        final blocked = await supabase
+            .from('kyorangtalk_blocks')
+            .select('id')
+            .eq('blocker_id', myId)
+            .eq('blocked_id', invite.initiatorId)
+            .maybeSingle();
+        if (blocked != null) {
+          print('🚫 차단된 사용자로부터의 통화 - 무시');
+          return;
+        }
+      }
+    } catch (e) {
+      print('🟡 차단 확인 실패 (무시): $e');
+    }
+
+    print('📞 통화 초대 수신: ${invite.callerName} (${invite.callId})');
+
+    // 시스템 통화 UI 표시
+    await CallKitService.instance.showIncomingCall(
+      callId:       invite.callId,
+      callerName:   invite.callerName,
+      callerAvatar: invite.callerAvatar,
+      isVideo:      invite.isVideo,
+      roomType:     invite.roomType,
+      sourceRoomId: invite.sourceRoomId,
+      initiatorId:  invite.initiatorId,
+      groupName:    invite.groupName,
+    );
+  }
+
   static void _handleNotificationTap(RemoteMessage message) {
+    // 통화 초대는 별도 핸들러에서 처리 (시스템 UI에서 받기/거절)
+    if (message.data['type'] == 'call_invite') {
+      // FCM에서 직접 탭한 경우 (백그라운드/종료에서 알림 탭)
+      // → CallKit이 이미 띄웠을 거고, 거기서 받기 누르면 onAccept 호출됨
+      return;
+    }
+
     final roomId      = message.data['room_id']       ?? '';
     final groupRoomId = message.data['group_room_id'] ?? '';
     final senderId    = message.data['sender_id']     ?? '';

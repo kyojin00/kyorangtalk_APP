@@ -7,7 +7,6 @@ import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/notifications/notification_service.dart';
-import '../../../shared/widgets/avatar_widget.dart';
 import '../../../features/chat/screens/multi_image_viewer_screen.dart';
 import '../../../features/profile/screens/user_profile_screen.dart';
 import '../../../features/chat/services/audio_service.dart';
@@ -18,11 +17,7 @@ import '../../chat/widgets/chat_input_bar.dart';
 import '../../chat/widgets/game_select_sheet.dart';
 import '../../chat/widgets/attachment_menu.dart';
 import '../../chat/widgets/reaction_picker_bar.dart';
-import '../../chat/widgets/summary_banner.dart';
-import '../../chat/widgets/smart_reply_bar.dart';
-import '../../chat/widgets/plan_card_widget.dart';
 import '../../chat/widgets/failed_message_bubble.dart';
-import '../../chat/services/plan_service.dart';
 import '../../chat/services/pending_message_store.dart';
 import '../../chat/services/draft_store.dart';
 import '../../chat/providers/reaction_provider.dart';
@@ -30,6 +25,7 @@ import '../../polls/widgets/create_poll_sheet.dart';
 import '../models/group_room_model.dart';
 import '../models/group_message_model.dart';
 import '../providers/group_chat_provider.dart';
+import '../widgets/group_chat_app_bar.dart';
 import '../widgets/group_message_bubble.dart';
 import '../widgets/system_message.dart';
 import 'group_members_screen.dart';
@@ -53,16 +49,13 @@ class _GroupChatRoomScreenState
   bool _sending = false;
   bool _disposed = false;
   bool _isMuted = false;
-  bool _summaryDismissed = false;
 
-  String? _smartReplyDismissedFor;
   bool _inputIsEmpty = true;
-
-  final Map<String, PlanModel> _detectedPlans = <String, PlanModel>{};
-  final Set<String> _planExtractInProgress = <String>{};
 
   bool _isPaginating = false;
   bool _noMoreMessages = false;
+
+  bool _initialScrolled = false;
 
   GroupMessageModel? _replyTo;
 
@@ -70,12 +63,15 @@ class _GroupChatRoomScreenState
   List<GroupMessageModel>? _lastMessages;
   List<_MessageGroup> _cachedGroups = [];
 
-  // ⭐ 실패한 메시지
+  List<GroupMessageModel> _sortedMessages = const [];
+
   List<PendingMessage> _failedMessages = [];
   final Set<String> _retryingIds = <String>{};
 
-  // ⭐ Draft 자동 저장
+  final Map<String, _OptimisticMessage> _optimisticMessages = {};
+
   Timer? _draftSaveDebouncer;
+  Timer? _markReadDebouncer;
 
   @override
   void initState() {
@@ -89,7 +85,7 @@ class _GroupChatRoomScreenState
     _inputController.addListener(_onInputChanged);
 
     _focusNode.addListener(() {
-      if (_focusNode.hasFocus) {
+      if (_focusNode.hasFocus && _isNearBottom()) {
         Future.delayed(const Duration(milliseconds: 300), () {
           _scrollToBottom();
         });
@@ -186,6 +182,7 @@ class _GroupChatRoomScreenState
     _disposed = true;
     currentOpenGroupRoomId = null;
     _draftSaveDebouncer?.cancel();
+    _markReadDebouncer?.cancel();
     DraftStore.save(
       roomId: widget.room.id,
       isGroup: true,
@@ -210,12 +207,16 @@ class _GroupChatRoomScreenState
   Future<void> _markAsRead() async {
     try {
       await markGroupRoomRead(widget.room.id);
-      if (!_disposed && mounted) {
-        ref.invalidate(groupRoomsProvider);
-      }
     } catch (e) {
       print('markAsRead 오류: $e');
     }
+  }
+
+  void _scheduleMarkAsRead() {
+    _markReadDebouncer?.cancel();
+    _markReadDebouncer = Timer(const Duration(seconds: 1), () {
+      if (!_disposed && mounted) _markAsRead();
+    });
   }
 
   void _scrollToBottom({bool animate = true, int delayMs = 150}) {
@@ -234,134 +235,36 @@ class _GroupChatRoomScreenState
     });
   }
 
+  void _forceInitialScroll() {
+    if (_initialScrolled) return;
+    _initialScrolled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_disposed || !mounted) return;
+      if (!_scrollController.hasClients) return;
+      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+    });
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (!_disposed && mounted && _scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (!_disposed && mounted && _scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
   bool _isNearBottom() {
     if (!_scrollController.hasClients) return true;
     final pos = _scrollController.position;
     return pos.pixels >= pos.maxScrollExtent - 300;
   }
 
-  List<String> _getRecentMessagesForContext() {
-    final msgs =
-        ref.read(groupMessagesProvider(widget.room.id)).value ?? [];
-    final recent = msgs.reversed
-        .where((m) =>
-            !m.isDeleted &&
-            m.msgType != 'system' &&
-            !m.isImageMessage &&
-            m.audioUrl == null &&
-            m.fileUrl == null &&
-            m.gameData == null &&
-            m.pollId == null &&
-            m.content.trim().isNotEmpty)
-        .take(5)
-        .toList()
-        .reversed
-        .toList();
-
-    return recent.map((m) {
-      final speaker =
-          m.senderId == _myId ? '나' : (m.senderNickname ?? '익명');
-      return '$speaker: ${m.content}';
-    }).toList();
-  }
-
-  Future<void> _tryExtractPlan(GroupMessageModel msg) async {
-    if (_disposed) return;
-    if (msg.isDeleted) return;
-    if (msg.msgType == 'system') return;
-    if (msg.isImageMessage ||
-        msg.fileUrl != null ||
-        msg.gameData != null ||
-        msg.pollId != null) return;
-
-    final text = msg.audioUrl != null
-        ? (msg.audioTranscript ?? '')
-        : msg.content;
-    if (text.trim().length < 10) return;
-
-    if (_planExtractInProgress.contains(msg.id)) return;
-    if (_detectedPlans.containsKey(msg.id)) return;
-
-    _planExtractInProgress.add(msg.id);
-
-    try {
-      final cached = await PlanService.fetchByMessageId(msg.id);
-      if (cached != null) {
-        if (!_disposed && mounted && !cached.isDismissed) {
-          setState(() => _detectedPlans[msg.id] = cached);
-        }
-        return;
-      }
-
-      final senderName =
-          msg.senderId == _myId ? '나' : (msg.senderNickname ?? '익명');
-      final plan = await PlanService.extractFromMessage(
-        roomId: widget.room.id,
-        isGroup: true,
-        messageId: msg.id,
-        messageText: text,
-        senderName: senderName,
-        context: _getRecentMessagesForContext(),
-      );
-
-      if (plan != null && !_disposed && mounted) {
-        setState(() => _detectedPlans[msg.id] = plan);
-      }
-    } finally {
-      _planExtractInProgress.remove(msg.id);
-    }
-  }
-
-  void _extractPlansForRecentMessages(List<GroupMessageModel> messages) {
-    final sorted = [...messages]
-      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    final recent =
-        sorted.length > 30 ? sorted.sublist(sorted.length - 30) : sorted;
-
-    final cutoff = DateTime.now().subtract(const Duration(hours: 24));
-    final candidates = recent.where((m) => m.createdAt.isAfter(cutoff));
-
-    for (final msg in candidates) {
-      _tryExtractPlan(msg);
-    }
-  }
-
-  GroupMessageModel? _getSmartReplyTargetMessage() {
-    if (!_inputIsEmpty) return null;
-
-    final msgs =
-        ref.read(groupMessagesProvider(widget.room.id)).value ?? [];
-    if (msgs.isEmpty) return null;
-
+  void _updateMessageCaches(List<GroupMessageModel> msgs) {
     final sorted = [...msgs]
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-    final last = sorted.last;
-
-    if (last.senderId == _myId) return null;
-    if (last.isDeleted) return null;
-    if (last.msgType == 'system') return null;
-    if (_smartReplyDismissedFor == last.id) return null;
-
-    final diff = DateTime.now().difference(last.createdAt);
-    if (diff.inMinutes >= 1) return null;
-
-    final hasText = last.audioUrl != null
-        ? (last.audioTranscript?.isNotEmpty ?? false)
-        : (!last.isImageMessage &&
-            last.fileUrl == null &&
-            last.gameData == null &&
-            last.pollId == null &&
-            last.content.trim().isNotEmpty);
-    if (!hasText) return null;
-
-    return last;
-  }
-
-  String _getSmartReplyText(GroupMessageModel msg) {
-    if (msg.audioUrl != null && msg.audioTranscript != null) {
-      return msg.audioTranscript!;
-    }
-    return msg.content;
+    _sortedMessages = sorted;
   }
 
   Future<void> _handleAttachment() async {
@@ -535,29 +438,31 @@ class _GroupChatRoomScreenState
     }
   }
 
-  // ═══════════════════════════════════════════════════
-  // ⭐ 메시지 전송
-  // ═══════════════════════════════════════════════════
   Future<void> _send() async {
     final content = _inputController.text.trim();
-    if (content.isEmpty || _sending) return;
+    if (content.isEmpty) return;
 
     final reply = _replyTo;
+    final localId = PendingMessageStore.generateLocalId();
+    final now = DateTime.now();
 
-    final pending = PendingMessage(
-      id: PendingMessageStore.generateLocalId(),
-      roomId: widget.room.id,
-      isGroup: true,
+    final optimistic = _OptimisticMessage(
+      localId: localId,
       content: content,
       replyToId: reply?.id,
       replyToContent: reply?.content,
-      createdAt: DateTime.now(),
+      createdAt: now,
     );
 
     _inputController.clear();
-    setState(() => _replyTo = null);
-
     DraftStore.clear(roomId: widget.room.id, isGroup: true);
+
+    setState(() {
+      _replyTo = null;
+      _optimisticMessages[localId] = optimistic;
+    });
+
+    _scrollToBottom();
 
     try {
       await sendGroupMessage(
@@ -567,18 +472,28 @@ class _GroupChatRoomScreenState
         replyToId:      reply?.id,
         replyToContent: reply?.content,
       );
+
       if (!_disposed && mounted) {
-        ref.invalidate(groupMessagesProvider(widget.room.id));
-        ref.invalidate(groupRoomsProvider);
+        setState(() => _optimisticMessages.remove(localId));
       }
-      _scrollToBottom();
     } catch (e) {
       if (_disposed) return;
-      final failed = pending.copyWith(errorMessage: e.toString());
+      final failed = PendingMessage(
+        id: localId,
+        roomId: widget.room.id,
+        isGroup: true,
+        content: content,
+        replyToId: reply?.id,
+        replyToContent: reply?.content,
+        createdAt: now,
+        errorMessage: e.toString(),
+      );
       await PendingMessageStore.upsert(failed);
       if (mounted) {
-        setState(() => _failedMessages = [..._failedMessages, failed]);
-        _scrollToBottom();
+        setState(() {
+          _optimisticMessages.remove(localId);
+          _failedMessages = [..._failedMessages, failed];
+        });
       }
     }
   }
@@ -602,8 +517,6 @@ class _GroupChatRoomScreenState
           _failedMessages.removeWhere((m) => m.id == msg.id);
           _retryingIds.remove(msg.id);
         });
-        ref.invalidate(groupMessagesProvider(widget.room.id));
-        ref.invalidate(groupRoomsProvider);
         _scrollToBottom();
       }
     } catch (e) {
@@ -668,8 +581,6 @@ class _GroupChatRoomScreenState
           imageUrl: url,
         );
         if (!_disposed && mounted) {
-          ref.invalidate(groupMessagesProvider(widget.room.id));
-          ref.invalidate(groupRoomsProvider);
           setState(() => _sending = false);
           _scrollToBottom(delayMs: 500);
         }
@@ -709,11 +620,7 @@ class _GroupChatRoomScreenState
         content:   urls.length == 1 ? '[이미지]' : '[이미지 ${urls.length}장]',
         imageUrls: urls,
       );
-      if (!_disposed && mounted) {
-        ref.invalidate(groupMessagesProvider(widget.room.id));
-        ref.invalidate(groupRoomsProvider);
-        _scrollToBottom(delayMs: 500);
-      }
+      if (!_disposed && mounted) _scrollToBottom(delayMs: 500);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -902,31 +809,55 @@ class _GroupChatRoomScreenState
       if (_disposed) return;
       next.whenData((msgs) {
         if (_disposed) return;
+
+        _updateMessageCaches(msgs);
+
         if (prev?.value == null) {
-          _extractPlansForRecentMessages(msgs);
+          _forceInitialScroll();
           return;
         }
+
         final prevIds = prev!.value!.map((m) => m.id).toSet();
         final newMessages =
             msgs.where((m) => !prevIds.contains(m.id)).toList();
 
         if (newMessages.isNotEmpty) {
+          if (_optimisticMessages.isNotEmpty) {
+            final myNewMessages =
+                newMessages.where((m) => m.senderId == _myId).toList();
+            if (myNewMessages.isNotEmpty) {
+              setState(() {
+                for (final newMsg in myNewMessages) {
+                  final matchKey = _optimisticMessages.entries
+                      .where((e) =>
+                          e.value.content == newMsg.content &&
+                          newMsg.createdAt
+                                  .difference(e.value.createdAt)
+                                  .inSeconds
+                                  .abs() <
+                              30)
+                      .map((e) => e.key)
+                      .firstOrNull;
+                  if (matchKey != null) {
+                    _optimisticMessages.remove(matchKey);
+                  }
+                }
+              });
+            }
+          }
+
           final sortedNew = [...newMessages]
             ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
           final latestNew = sortedNew.last;
-          final allSorted = [...msgs]
-            ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-          final isAtBottom = allSorted.last.id == latestNew.id;
+          final allSorted = _sortedMessages;
+          final isAtBottom = allSorted.isNotEmpty &&
+              allSorted.last.id == latestNew.id;
 
           if (isAtBottom) {
             if (_isNearBottom() || latestNew.senderId == _myId) {
               _scrollToBottom(delayMs: 300);
             }
-            _markAsRead();
-          }
-
-          for (final msg in newMessages) {
-            _tryExtractPlan(msg);
+            _scheduleMarkAsRead();
           }
         }
       });
@@ -935,78 +866,19 @@ class _GroupChatRoomScreenState
     return Scaffold(
       backgroundColor: AppTheme.bg,
       resizeToAvoidBottomInset: true,
-      appBar: AppBar(
-        backgroundColor: AppTheme.bg,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios,
-              color: AppTheme.primaryLight, size: 20),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: GestureDetector(
-          onTap: _openRoomInfo,
-          child: Row(
-            children: [
-              AvatarWidget(
-                  url:  widget.room.avatarUrl,
-                  name: widget.room.name,
-                  size: 34),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(widget.room.name,
-                              style: TextStyle(
-                                  fontSize: 15,
-                                  fontWeight: FontWeight.w700,
-                                  color: AppTheme.textMain),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis),
-                        ),
-                        if (_isMuted) ...[
-                          const SizedBox(width: 4),
-                          Icon(Icons.notifications_off,
-                              color: AppTheme.textSub, size: 14),
-                        ],
-                      ],
-                    ),
-                    Text('${widget.room.memberCount}명',
-                        style: TextStyle(
-                            fontSize: 11, color: AppTheme.textSub)),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          IconButton(
-            icon: Icon(Icons.menu, color: AppTheme.textSub),
-            onPressed: _openRoomInfo,
-          ),
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Divider(height: 1, color: AppTheme.border),
-        ),
+      // ⭐ 분리된 AppBar 위젯 사용
+      appBar: buildGroupChatAppBar(
+        context: context,
+        room: widget.room,
+        isMuted: _isMuted,
+        onTitleTap: _openRoomInfo,
+        onMenuTap: _openRoomInfo,
       ),
 
       body: SafeArea(
         bottom: false,
         child: Column(
           children: [
-            if (!_summaryDismissed)
-              SummaryBanner(
-                roomId: widget.room.id,
-                isGroup: true,
-                unreadCount: widget.room.unreadCount,
-                onDismiss: () =>
-                    setState(() => _summaryDismissed = true),
-              ),
-
             Expanded(
               child: msgsAsync.when(
                 loading: () => const Center(
@@ -1015,7 +887,9 @@ class _GroupChatRoomScreenState
                     child: Text('오류: $e',
                         style: TextStyle(color: AppTheme.textSub))),
                 data: (messages) {
-                  if (messages.isEmpty && _failedMessages.isEmpty) {
+                  if (messages.isEmpty &&
+                      _failedMessages.isEmpty &&
+                      _optimisticMessages.isEmpty) {
                     return Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -1032,12 +906,6 @@ class _GroupChatRoomScreenState
 
                   final groups = _getGroupedMessages(messages);
 
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (!_isPaginating) {
-                      _scrollToBottom(animate: false);
-                    }
-                  });
-
                   final items = <_ListItem>[];
 
                   if (_isPaginating) {
@@ -1052,6 +920,16 @@ class _GroupChatRoomScreenState
                       final msg = group.items[i];
                       final prev = i > 0 ? group.items[i - 1] : null;
                       items.add(_ListItem.message(msg, prev));
+                    }
+                  }
+
+                  if (_optimisticMessages.isNotEmpty) {
+                    final sortedOptimistic =
+                        _optimisticMessages.values.toList()
+                          ..sort((a, b) =>
+                              a.createdAt.compareTo(b.createdAt));
+                    for (final o in sortedOptimistic) {
+                      items.add(_ListItem.optimistic(o));
                     }
                   }
 
@@ -1121,6 +999,17 @@ class _GroupChatRoomScreenState
                         );
                       }
 
+                      if (item.isOptimistic) {
+                        final o = item.optimistic!;
+                        return RepaintBoundary(
+                          key: ValueKey('opt_${o.localId}'),
+                          child: _OptimisticBubble(
+                            content: o.content,
+                            timeStr: _timeStr(o.createdAt),
+                          ),
+                        );
+                      }
+
                       if (item.isFailedMessage) {
                         final f = item.failedMessage!;
                         return RepaintBoundary(
@@ -1148,64 +1037,31 @@ class _GroupChatRoomScreenState
                           (prev?.senderId != msg.senderId || isPrevSystem);
                       final key = _getKeyFor(msg.id);
 
-                      final detectedPlan = _detectedPlans[msg.id];
-
-                      return Column(
-                        crossAxisAlignment: isMe
-                            ? CrossAxisAlignment.end
-                            : CrossAxisAlignment.start,
-                        children: [
-                          GestureDetector(
-                            key: key,
-                            onLongPress: () => _showMessageOptions(msg),
-                            child: GroupMessageBubble(
-                              msg:            msg,
-                              roomId:         widget.room.id,
-                              isMe:           isMe,
-                              showSenderInfo: showSenderInfo,
-                              timeStr:        _timeStr(msg.createdAt),
-                              onAvatarTap: isMe
-                                  ? null
-                                  : () {
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (_) => UserProfileScreen(
-                                            userId: msg.senderId,
-                                            nickname:
-                                                msg.senderNickname ?? '알 수 없음',
-                                            avatarUrl: msg.senderAvatar,
-                                          ),
-                                        ),
-                                      );
-                                    },
-                            ),
-                          ),
-                          if (detectedPlan != null)
-                            Padding(
-                              padding: EdgeInsets.only(
-                                left: isMe ? 40 : 36,
-                                right: isMe ? 4 : 40,
-                                top: 4,
-                                bottom: 4,
-                              ),
-                              child: PlanCard(
-                                plan: detectedPlan,
-                                onDismissed: () {
-                                  if (!_disposed && mounted) {
-                                    setState(() =>
-                                        _detectedPlans.remove(msg.id));
-                                  }
+                      return GestureDetector(
+                        key: key,
+                        onLongPress: () => _showMessageOptions(msg),
+                        child: GroupMessageBubble(
+                          msg:            msg,
+                          roomId:         widget.room.id,
+                          isMe:           isMe,
+                          showSenderInfo: showSenderInfo,
+                          timeStr:        _timeStr(msg.createdAt),
+                          onAvatarTap: isMe
+                              ? null
+                              : () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => UserProfileScreen(
+                                        userId: msg.senderId,
+                                        nickname:
+                                            msg.senderNickname ?? '알 수 없음',
+                                        avatarUrl: msg.senderAvatar,
+                                      ),
+                                    ),
+                                  );
                                 },
-                                onUpdated: (updated) {
-                                  if (!_disposed && mounted) {
-                                    setState(() =>
-                                        _detectedPlans[msg.id] = updated);
-                                  }
-                                },
-                              ),
-                            ),
-                        ],
+                        ),
                       );
                     },
                   );
@@ -1323,43 +1179,100 @@ class _GroupChatRoomScreenState
   }
 
   Widget _buildActiveInput() {
-    final smartReplyTarget = _getSmartReplyTargetMessage();
+    return ChatInputBar(
+      controller: _inputController,
+      focusNode: _focusNode,
+      enabled: true,
+      sending: false,
+      onAttachment: _handleAttachment,
+      onSend: _send,
+    );
+  }
+}
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (smartReplyTarget != null)
-          SmartReplyBar(
-            key: ValueKey('smart_reply_${smartReplyTarget.id}'),
-            roomId: widget.room.id,
-            isGroup: true,
-            lastMessageId: smartReplyTarget.id,
-            lastMessageText: _getSmartReplyText(smartReplyTarget),
-            senderName: smartReplyTarget.senderNickname ?? '익명',
-            contextMessages: _getRecentMessagesForContext(),
-            onSelected: (text) {
-              _inputController.text = text;
-              _inputController.selection = TextSelection.fromPosition(
-                TextPosition(offset: text.length),
-              );
-              _focusNode.requestFocus();
-              setState(() =>
-                  _smartReplyDismissedFor = smartReplyTarget.id);
-            },
-            onDismiss: () {
-              setState(() =>
-                  _smartReplyDismissedFor = smartReplyTarget.id);
-            },
+class _OptimisticMessage {
+  final String localId;
+  final String content;
+  final String? replyToId;
+  final String? replyToContent;
+  final DateTime createdAt;
+
+  _OptimisticMessage({
+    required this.localId,
+    required this.content,
+    this.replyToId,
+    this.replyToContent,
+    required this.createdAt,
+  });
+}
+
+class _OptimisticBubble extends StatelessWidget {
+  final String content;
+  final String timeStr;
+
+  const _OptimisticBubble({
+    required this.content,
+    required this.timeStr,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(right: 6, bottom: 2),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.schedule,
+                  size: 11,
+                  color: AppTheme.textMuted,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  timeStr,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: AppTheme.textMuted,
+                  ),
+                ),
+              ],
+            ),
           ),
-        ChatInputBar(
-          controller: _inputController,
-          focusNode: _focusNode,
-          enabled: true,
-          sending: _sending,
-          onAttachment: _handleAttachment,
-          onSend: _send,
-        ),
-      ],
+          Flexible(
+            child: Opacity(
+              opacity: 0.65,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: AppTheme.primary,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(16),
+                    topRight: Radius.circular(16),
+                    bottomLeft: Radius.circular(16),
+                    bottomRight: Radius.circular(4),
+                  ),
+                ),
+                child: Text(
+                  content,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1375,6 +1288,7 @@ class _ListItem {
   final GroupMessageModel? message;
   final GroupMessageModel? prevMessage;
   final PendingMessage? failedMessage;
+  final _OptimisticMessage? optimistic;
   final bool isLoadingIndicator;
   final bool isStartOfChatMarker;
 
@@ -1382,12 +1296,14 @@ class _ListItem {
       : message = null,
         prevMessage = null,
         failedMessage = null,
+        optimistic = null,
         isLoadingIndicator = false,
         isStartOfChatMarker = false;
 
   _ListItem.message(this.message, this.prevMessage)
       : dateLabel = null,
         failedMessage = null,
+        optimistic = null,
         isLoadingIndicator = false,
         isStartOfChatMarker = false;
 
@@ -1395,6 +1311,15 @@ class _ListItem {
       : dateLabel = null,
         message = null,
         prevMessage = null,
+        optimistic = null,
+        isLoadingIndicator = false,
+        isStartOfChatMarker = false;
+
+  _ListItem.optimistic(this.optimistic)
+      : dateLabel = null,
+        message = null,
+        prevMessage = null,
+        failedMessage = null,
         isLoadingIndicator = false,
         isStartOfChatMarker = false;
 
@@ -1403,6 +1328,7 @@ class _ListItem {
         message = null,
         prevMessage = null,
         failedMessage = null,
+        optimistic = null,
         isLoadingIndicator = true,
         isStartOfChatMarker = false;
 
@@ -1411,6 +1337,7 @@ class _ListItem {
         message = null,
         prevMessage = null,
         failedMessage = null,
+        optimistic = null,
         isLoadingIndicator = false,
         isStartOfChatMarker = true;
 
@@ -1420,4 +1347,5 @@ class _ListItem {
       !isStartOfChatMarker;
 
   bool get isFailedMessage => failedMessage != null;
+  bool get isOptimistic => optimistic != null;
 }

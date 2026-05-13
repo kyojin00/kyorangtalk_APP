@@ -17,6 +17,7 @@ import 'features/onboarding/onboarding_screen.dart';
 import 'main.dart';
 import 'shared/screens/main_screen.dart';
 import 'shared/screens/splash_screen.dart';
+import 'features/call/widgets/call_router.dart';
 
 bool? _hasProfileCache;
 
@@ -209,9 +210,15 @@ class KyorangTalkApp extends ConsumerWidget {
         final isDark = brightness == Brightness.dark;
         AppTheme.setDark(isDark);
 
+        // ⭐ CallRouter를 최상위 Stack에 배치 — 어디서든 들어오는 통화 감지
         return KeyedSubtree(
           key: ValueKey<bool>(isDark),
-          child: child ?? const SizedBox(),
+          child: Stack(
+            children: [
+              child ?? const SizedBox(),
+              const CallRouter(),
+            ],
+          ),
         );
       },
     );

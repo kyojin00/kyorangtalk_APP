@@ -9,6 +9,7 @@ class ChatRoomModel {
   final bool isSent;
   final String roomId;
   final String? pinnedMessage;
+  final bool isPinned;        // ⭐ NEW — 상단 고정 여부
 
   ChatRoomModel({
     required this.partnerId,
@@ -21,5 +22,6 @@ class ChatRoomModel {
     required this.isSent,
     required this.roomId,
     this.pinnedMessage,
+    this.isPinned = false,
   });
 }

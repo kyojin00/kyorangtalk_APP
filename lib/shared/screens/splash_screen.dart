@@ -2,9 +2,23 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme/app_theme.dart';
 import '../../main.dart';
+
+// ═══════════════════════════════════════════════════
+// 🌟 SplashScreen — 글자 애니메이션 (Google Fonts 적용)
+//
+// 흐름:
+//  0.0s  ─ 검정 그라데이션 배경 등장
+//  0.2s  ─ "교" 페이드인
+//  0.7s  ─ "랑" 페이드인 (교 옆에 추가)
+//  1.3s  ─ "교 랑" 유지
+//  1.6s  ─ "교 랑" 페이드아웃 (위로 살짝)
+//  2.0s  ─ "KYORANG" 등장 (Playfair Display, 부드러운 세리프)
+//  2.8s  ─ 메인 이동
+// ═══════════════════════════════════════════════════
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -16,63 +30,138 @@ class SplashScreen extends ConsumerStatefulWidget {
 class _SplashScreenState extends ConsumerState<SplashScreen>
     with TickerProviderStateMixin {
   late AnimationController _glowController;
-  late AnimationController _dotsController;
-  late AnimationController _fadeController;
 
-  late Animation<double> _glowAnimation;
-  late Animation<double> _fadeInAnimation;
+  // 한글 두 글자
+  late AnimationController _gyoController;       // "교"
+  late AnimationController _rangController;      // "랑"
+  late AnimationController _koreanFadeOut;       // 교랑 사라짐
+
+  // 영문
+  late AnimationController _englishController;   // "KYORANG"
+
+  late Animation<double> _gyoFade;
+  late Animation<Offset> _gyoSlide;
+  late Animation<double> _rangFade;
+  late Animation<Offset> _rangSlide;
+
+  late Animation<double> _koreanOutFade;
+  late Animation<Offset> _koreanOutSlide;
+
+  late Animation<double> _englishFade;
+  late Animation<double> _englishScale;
 
   @override
   void initState() {
     super.initState();
 
-    // ✨ 로고는 이미 네이티브 스플래시에 있음 (크기 100% 유지)
-    // 나머지 요소들만 페이드인
-
     _glowController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
-    _glowAnimation = Tween<double>(begin: 0.3, end: 0.8).animate(
+
+    // "교" 등장
+    _gyoController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    );
+    _gyoFade = CurvedAnimation(
+      parent: _gyoController,
+      curve: Curves.easeOut,
+    );
+    _gyoSlide = Tween<Offset>(
+      begin: const Offset(0, 0.3),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: _gyoController,
+      curve: Curves.easeOutCubic,
+    ));
+
+    // "랑" 등장
+    _rangController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    );
+    _rangFade = CurvedAnimation(
+      parent: _rangController,
+      curve: Curves.easeOut,
+    );
+    _rangSlide = Tween<Offset>(
+      begin: const Offset(0, 0.3),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: _rangController,
+      curve: Curves.easeOutCubic,
+    ));
+
+    // "교 랑" 사라짐
+    _koreanFadeOut = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 400),
+    );
+    _koreanOutFade = Tween<double>(begin: 1.0, end: 0.0).animate(
       CurvedAnimation(
-        parent: _glowController,
-        curve: Curves.easeInOut,
+        parent: _koreanFadeOut,
+        curve: Curves.easeIn,
+      ),
+    );
+    _koreanOutSlide = Tween<Offset>(
+      begin: Offset.zero,
+      end: const Offset(0, -0.3),
+    ).animate(CurvedAnimation(
+      parent: _koreanFadeOut,
+      curve: Curves.easeIn,
+    ));
+
+    // "KYORANG" 등장
+    _englishController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    _englishFade = CurvedAnimation(
+      parent: _englishController,
+      curve: Curves.easeOut,
+    );
+    _englishScale = Tween<double>(begin: 0.85, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _englishController,
+        curve: Curves.easeOutCubic,
       ),
     );
 
-    _dotsController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1500),
-    )..repeat();
-
-    // 부가 요소들 페이드인
-    _fadeController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    );
-    _fadeInAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _fadeController,
-        curve: Curves.easeOut,
-      ),
-    );
-
-    // 바로 페이드인 시작
-    _fadeController.forward();
-
+    _runAnimation();
     _navigate();
+  }
+
+  Future<void> _runAnimation() async {
+    await Future.delayed(const Duration(milliseconds: 200));
+    if (!mounted) return;
+    _gyoController.forward();
+
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (!mounted) return;
+    _rangController.forward();
+
+    await Future.delayed(const Duration(milliseconds: 700));
+    if (!mounted) return;
+    _koreanFadeOut.forward();
+
+    await Future.delayed(const Duration(milliseconds: 400));
+    if (!mounted) return;
+    _englishController.forward();
   }
 
   @override
   void dispose() {
     _glowController.dispose();
-    _dotsController.dispose();
-    _fadeController.dispose();
+    _gyoController.dispose();
+    _rangController.dispose();
+    _koreanFadeOut.dispose();
+    _englishController.dispose();
     super.dispose();
   }
 
   Future<void> _navigate() async {
-    await Future.delayed(const Duration(milliseconds: 1500));
+    await Future.delayed(const Duration(milliseconds: 2800));
 
     if (!mounted) return;
 
@@ -127,7 +216,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
     return Scaffold(
       body: Stack(
         children: [
-          // ✨ 동일한 그라데이션 배경 (네이티브와 완벽히 일치)
+          // ✨ 그라데이션 배경
           Container(
             decoration: const BoxDecoration(
               gradient: LinearGradient(
@@ -143,169 +232,106 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
             ),
           ),
 
-          // ✨ 파티클 (페이드인)
-          FadeTransition(
-            opacity: _fadeInAnimation,
-            child: AnimatedBuilder(
-              animation: _glowController,
-              builder: (_, __) {
-                return CustomPaint(
-                  size: Size.infinite,
-                  painter: _ParticlePainter(
-                      animation: _glowController.value),
-                );
-              },
-            ),
+          // ✨ 떠다니는 파티클
+          AnimatedBuilder(
+            animation: _glowController,
+            builder: (_, __) {
+              return CustomPaint(
+                size: Size.infinite,
+                painter: _ParticlePainter(
+                    animation: _glowController.value),
+              );
+            },
           ),
 
-          // ✨ 중앙 컨텐츠
+          // ✨ 중앙 글자 애니메이션
           Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                // 로고 (네이티브와 똑같은 위치/크기, 글로우만 추가)
-                AnimatedBuilder(
-                  animation: _glowController,
-                  builder: (_, __) {
-                    return Container(
-                      width: 120,
-                      height: 120,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(32),
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppTheme.primary
-                                .withOpacity(_glowAnimation.value),
-                            blurRadius: 40,
-                            spreadRadius: 8,
+            child: AnimatedBuilder(
+              animation: Listenable.merge([
+                _gyoController,
+                _rangController,
+                _koreanFadeOut,
+                _englishController,
+              ]),
+              builder: (_, __) {
+                final isKoreanGone = _koreanFadeOut.value > 0.95;
+
+                return Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    // ─── 한글 "교 랑" ───────────────────
+                    if (!isKoreanGone)
+                      Opacity(
+                        opacity: _koreanOutFade.value,
+                        child: SlideTransition(
+                          position: _koreanOutSlide,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // "교"
+                              FadeTransition(
+                                opacity: _gyoFade,
+                                child: SlideTransition(
+                                  position: _gyoSlide,
+                                  child: const _KoreanLetter('교'),
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              // "랑"
+                              FadeTransition(
+                                opacity: _rangFade,
+                                child: SlideTransition(
+                                  position: _rangSlide,
+                                  child: const _KoreanLetter('랑'),
+                                ),
+                              ),
+                            ],
                           ),
-                          BoxShadow(
-                            color: AppTheme.primaryLight
-                                .withOpacity(
-                                    _glowAnimation.value * 0.5),
-                            blurRadius: 60,
-                            spreadRadius: 15,
-                          ),
-                        ],
+                        ),
                       ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(32),
-                        child: Container(
-                          decoration: const BoxDecoration(
-                            gradient: LinearGradient(
+
+                    // ─── 영문 "KYORANG" (Playfair Display) ─────
+                    if (isKoreanGone || _englishController.value > 0)
+                      FadeTransition(
+                        opacity: _englishFade,
+                        child: ScaleTransition(
+                          scale: _englishScale,
+                          child: ShaderMask(
+                            shaderCallback: (bounds) => LinearGradient(
                               begin: Alignment.topLeft,
                               end: Alignment.bottomRight,
                               colors: [
-                                AppTheme.primary,
+                                Colors.white,
                                 AppTheme.primaryLight,
                               ],
-                            ),
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(20),
-                            child: Image.asset(
-                              'assets/images/logo.png',
-                              fit: BoxFit.contain,
-                              errorBuilder: (_, __, ___) => const Center(
-                                child: Text(
-                                  '💬',
-                                  style: TextStyle(fontSize: 56),
-                                ),
+                            ).createShader(bounds),
+                            child: Text(
+                              'KYORANG',
+                              style: GoogleFonts.playfairDisplay(
+                                fontSize: 54,
+                                fontWeight: FontWeight.w500,
+                                color: Colors.white,
+                                letterSpacing: 4,
+                                height: 1.0,
+                                fontStyle: FontStyle.italic,
                               ),
                             ),
                           ),
                         ),
                       ),
-                    );
-                  },
-                ),
-
-                const SizedBox(height: 32),
-
-                // ✨ 앱 이름 (부드럽게 페이드인)
-                FadeTransition(
-                  opacity: _fadeInAnimation,
-                  child: ShaderMask(
-                    shaderCallback: (bounds) => const LinearGradient(
-                      colors: [
-                        Colors.white,
-                        AppTheme.primaryLight,
-                      ],
-                    ).createShader(bounds),
-                    child: const Text(
-                      '교랑톡',
-                      style: TextStyle(
-                        fontSize: 36,
-                        fontWeight: FontWeight.w900,
-                        color: Colors.white,
-                        letterSpacing: -0.5,
-                      ),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 8),
-
-                FadeTransition(
-                  opacity: _fadeInAnimation,
-                  child: Text(
-                    '친구들과 편하게 이야기해요',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.white.withOpacity(0.7),
-                      fontWeight: FontWeight.w500,
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 60),
-
-                // ✨ 점 3개 애니메이션
-                FadeTransition(
-                  opacity: _fadeInAnimation,
-                  child: AnimatedBuilder(
-                    animation: _dotsController,
-                    builder: (_, __) {
-                      return Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: List.generate(3, (i) {
-                          final delay = i * 0.2;
-                          final progress =
-                              (_dotsController.value - delay)
-                                  .clamp(0.0, 1.0);
-                          final scale = math.sin(progress * math.pi);
-
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 4),
-                            child: Container(
-                              width: 8 + (scale * 4),
-                              height: 8 + (scale * 4),
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: AppTheme.primaryLight
-                                    .withOpacity(
-                                        0.4 + (scale * 0.6)),
-                              ),
-                            ),
-                          );
-                        }),
-                      );
-                    },
-                  ),
-                ),
-              ],
+                  ],
+                );
+              },
             ),
           ),
 
           // ✨ 하단 워터마크
           Positioned(
-            bottom: 40,
+            bottom: 50,
             left: 0,
             right: 0,
             child: FadeTransition(
-              opacity: _fadeInAnimation,
+              opacity: _englishFade,
               child: Column(
                 children: [
                   Container(
@@ -321,14 +347,15 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                       ),
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
                   Text(
-                    'KYORANG TALK',
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: Colors.white.withOpacity(0.4),
-                      fontWeight: FontWeight.w700,
+                    'kyorang.com',
+                    style: GoogleFonts.playfairDisplay(
+                      fontSize: 11,
+                      color: Colors.white.withOpacity(0.5),
+                      fontWeight: FontWeight.w500,
                       letterSpacing: 2,
+                      fontStyle: FontStyle.italic,
                     ),
                   ),
                 ],
@@ -341,7 +368,44 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
   }
 }
 
+// ═══════════════════════════════════════════════════
+// 🇰🇷 한글 글자 — Noto Serif KR
+// ═══════════════════════════════════════════════════
+
+class _KoreanLetter extends StatelessWidget {
+  final String letter;
+  const _KoreanLetter(this.letter);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      letter,
+      style: GoogleFonts.notoSerifKr(
+        fontSize: 88,
+        fontWeight: FontWeight.w500,
+        color: Colors.white,
+        height: 1.0,
+        shadows: [
+          Shadow(
+            color: AppTheme.primary.withOpacity(0.6),
+            blurRadius: 30,
+            offset: const Offset(0, 0),
+          ),
+          Shadow(
+            color: AppTheme.primaryLight.withOpacity(0.4),
+            blurRadius: 50,
+            offset: const Offset(0, 0),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
 // 떠다니는 파티클
+// ═══════════════════════════════════════════════════
+
 class _ParticlePainter extends CustomPainter {
   final double animation;
 
@@ -360,8 +424,7 @@ class _ParticlePainter extends CustomPainter {
 
       final paint = Paint()
         ..color = const Color(0xFFA78BFA).withOpacity(opacity)
-        ..maskFilter =
-            const MaskFilter.blur(BlurStyle.normal, 3);
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3);
 
       canvas.drawCircle(Offset(x, y), radius, paint);
     }
@@ -375,8 +438,7 @@ class _ParticlePainter extends CustomPainter {
 
       final paint = Paint()
         ..color = const Color(0xFF7C3AED).withOpacity(opacity)
-        ..maskFilter =
-            const MaskFilter.blur(BlurStyle.normal, 2);
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2);
 
       canvas.drawCircle(Offset(x, y), radius, paint);
     }

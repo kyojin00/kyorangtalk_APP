@@ -18,17 +18,19 @@ import '../sheets/friend_manage_sheet.dart';
 import '../sheets/requests_sheet.dart';
 
 // ⭐ 하위 호환성 re-export
-// 이 파일을 import하던 기존 코드(app.dart, chat_list_screen.dart,
-// chat_room_screen.dart, main_screen.dart, settings_screen.dart,
-// group_chat_list_screen.dart)가 변경 없이도 FriendModel,
-// SuggestedFriend, 5개 provider를 그대로 쓸 수 있도록 다시 내보냄.
 export '../models/friend_model.dart';
 export '../providers/friends_provider.dart';
 
 // ═══════════════════════════════════════════════
-// 친구 메인 스크린
+// 친구 메인 스크린 — 리디자인
 //
-// 위치: lib/features/friends/screens/friends_screen.dart
+// 변경:
+// - 헤더: SliverAppBar 스타일, 큰 타이틀
+// - 내 프로필: 그라데이션 + 액션 버튼
+// - 검색바: 더 부드러운 음영 + 포커스 효과
+// - 친구 목록: 카운트 강조 + 그루핑
+// - 빈 상태: 일러스트 + CTA 강화
+// - 사이드 패널: 헤더에 프로필 미니카드
 // ═══════════════════════════════════════════════
 
 class FriendsScreen extends ConsumerStatefulWidget {
@@ -41,6 +43,7 @@ class FriendsScreen extends ConsumerStatefulWidget {
 class _FriendsScreenState extends ConsumerState<FriendsScreen>
     with SingleTickerProviderStateMixin {
   final _searchController = TextEditingController();
+  final _searchFocus = FocusNode();
   String _search = '';
   final _myId = Supabase.instance.client.auth.currentUser!.id;
 
@@ -63,12 +66,14 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
       parent: _panelController,
       curve: Curves.easeOutCubic,
     ));
+    _searchFocus.addListener(() => setState(() {}));
   }
 
   @override
   void dispose() {
     _panelController.dispose();
     _searchController.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
@@ -180,7 +185,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
   }
 
   // ═════════════════════════════════════════════
-  // 친구 요청 (보내기/수락/거절/취소)
+  // 친구 요청
   // ═════════════════════════════════════════════
   Future<void> _sendSuggestionRequest(SuggestedFriend s) async {
     try {
@@ -198,8 +203,9 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
     }
   }
 
-  void _dismissSuggestion(String userId) {
+  void _dismissSuggestion(String userId) async {
     setState(() => _dismissedSuggestions.add(userId));
+    await dismissFriendSuggestion(userId);
   }
 
   Future<void> _acceptRequest(String requestId) async {
@@ -261,8 +267,252 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
   }
 
   // ═════════════════════════════════════════════
-  // 스낵바
+  // 즐겨찾기 토글
   // ═════════════════════════════════════════════
+  Future<void> _toggleFavorite(FriendModel friend) async {
+    try {
+      final isNowFavorite = await toggleFriendFavorite(friend.friendId);
+      _invalidateAll();
+      if (mounted) {
+        _showSnack(isNowFavorite
+            ? '${friend.nickname}님을 즐겨찾기에 추가했어요'
+            : '${friend.nickname}님을 즐겨찾기에서 해제했어요');
+      }
+    } catch (e) {
+      if (mounted) _showSnack('즐겨찾기 변경 실패');
+    }
+  }
+
+  // ═════════════════════════════════════════════
+  // 신고 시트
+  // ═════════════════════════════════════════════
+  void _showReportSheet(FriendModel friend) {
+    String selectedReason = 'spam';
+    final descriptionController = TextEditingController();
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => Container(
+          decoration: BoxDecoration(
+            color: AppTheme.bgCard,
+            borderRadius:
+                const BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                  20, 12, 20, MediaQuery.of(ctx).viewInsets.bottom + 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 4,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        color: AppTheme.border,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  Text(
+                    '${friend.nickname}님 신고',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.textMain,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    '사유 선택',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.textSub,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+
+                  ...const [
+                    ['spam', '스팸/광고'],
+                    ['harassment', '괴롭힘/욕설'],
+                    ['inappropriate', '부적절한 콘텐츠'],
+                    ['fake', '사칭/허위 정보'],
+                    ['other', '기타'],
+                  ].map((r) => RadioListTile<String>(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        value: r[0],
+                        groupValue: selectedReason,
+                        onChanged: (v) => setSheetState(
+                            () => selectedReason = v ?? 'spam'),
+                        activeColor: AppTheme.primary,
+                        title: Text(
+                          r[1],
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: AppTheme.textMain,
+                          ),
+                        ),
+                      )),
+
+                  const SizedBox(height: 12),
+                  Text(
+                    '자세한 내용 (선택)',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: AppTheme.textSub,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: descriptionController,
+                    maxLines: 3,
+                    maxLength: 500,
+                    style: TextStyle(
+                        color: AppTheme.textMain, fontSize: 13),
+                    decoration: InputDecoration(
+                      hintText: '추가로 알려주실 내용이 있다면 적어주세요',
+                      hintStyle: TextStyle(
+                          color: AppTheme.textSub, fontSize: 13),
+                      filled: true,
+                      fillColor: AppTheme.bg,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: BorderSide(color: AppTheme.border),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: BorderSide(color: AppTheme.border),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide:
+                            const BorderSide(color: AppTheme.primary),
+                      ),
+                      contentPadding: const EdgeInsets.all(12),
+                    ),
+                  ),
+
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          style: OutlinedButton.styleFrom(
+                            padding:
+                                const EdgeInsets.symmetric(vertical: 12),
+                            side: BorderSide(color: AppTheme.border),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            '취소',
+                            style: TextStyle(color: AppTheme.textSub),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: () async {
+                            Navigator.pop(ctx);
+                            try {
+                              await reportFriend(
+                                reportedUserId: friend.friendId,
+                                reason: selectedReason,
+                                description: descriptionController
+                                        .text.trim().isEmpty
+                                    ? null
+                                    : descriptionController.text.trim(),
+                              );
+                              if (mounted) _showSnack('신고가 접수됐어요');
+                            } catch (e) {
+                              if (mounted) _showSnack('신고 실패');
+                            }
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFFEF4444),
+                            foregroundColor: Colors.white,
+                            padding:
+                                const EdgeInsets.symmetric(vertical: 12),
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: const Text(
+                            '신고하기',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ═════════════════════════════════════════════
+  // 친구 삭제 확인
+  // ═════════════════════════════════════════════
+  void _confirmRemoveFriend(FriendModel friend) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.bgCard,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          '친구 삭제',
+          style: TextStyle(
+            color: AppTheme.textMain,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        content: Text(
+          '${friend.nickname}님을 친구 목록에서 삭제할까요?',
+          style: TextStyle(color: AppTheme.textSub, fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('취소',
+                style: TextStyle(color: AppTheme.textSub)),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _removeFriend(friend.friendId);
+            },
+            child: const Text(
+              '삭제',
+              style: TextStyle(
+                color: Color(0xFFEF4444),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showSnack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -285,8 +535,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
       backgroundColor: AppTheme.bgCard,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (_) => AddFriendSheet(
         myId: _myId,
@@ -302,8 +551,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
       backgroundColor: AppTheme.bgCard,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (_) => RequestsSheet(
         onAccept: _acceptRequest,
@@ -319,8 +567,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
       backgroundColor: AppTheme.bgCard,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius:
-            BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (ctx) => FriendManageSheet(
         myId: _myId,
@@ -345,8 +592,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
             borderRadius: BorderRadius.circular(16)),
         title: Text('차단하기',
             style: TextStyle(
-                color: AppTheme.textMain,
-                fontWeight: FontWeight.w700)),
+                color: AppTheme.textMain, fontWeight: FontWeight.w700)),
         content: Text(
           '$nickname님을 차단하면 서로 메시지를 주고받을 수 없어요.\n친구 관계도 해제돼요.',
           style: TextStyle(color: AppTheme.textSub, fontSize: 14),
@@ -354,8 +600,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: Text('취소',
-                style: TextStyle(color: AppTheme.textSub)),
+            child: Text('취소', style: TextStyle(color: AppTheme.textSub)),
           ),
           TextButton(
             onPressed: () {
@@ -394,142 +639,291 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
           body: SafeArea(
             child: Column(
               children: [
-                // ── 헤더 ──
-                Container(
-                  padding: const EdgeInsets.fromLTRB(20, 16, 8, 16),
-                  decoration: BoxDecoration(
-                    border: Border(
-                        bottom: BorderSide(color: AppTheme.border)),
-                  ),
+                // ─────────────────────────────────────────
+                // ✨ 헤더 — 큰 타이틀 + 우측 아이콘
+                // ─────────────────────────────────────────
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 18, 12, 12),
                   child: Row(
                     children: [
-                      Text('친구',
-                          style: TextStyle(
-                              fontSize: 20,
+                      Text(
+                        '친구',
+                        style: TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                          color: AppTheme.textMain,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      friendsAsync.maybeWhen(
+                        data: (friends) => Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 9, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: AppTheme.bgCard,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            '${friends.length}',
+                            style: TextStyle(
+                              fontSize: 13,
                               fontWeight: FontWeight.w800,
-                              color: AppTheme.textMain)),
+                              color: AppTheme.textSub,
+                            ),
+                          ),
+                        ),
+                        orElse: () => const SizedBox.shrink(),
+                      ),
                       const Spacer(),
+                      // 친구 추가 빠른 버튼
+                      _CircleIconButton(
+                        icon: Icons.person_add_outlined,
+                        onTap: _showAddFriendDialog,
+                      ),
+                      const SizedBox(width: 8),
+                      // 친구 요청 (배지 포함)
                       Stack(
                         clipBehavior: Clip.none,
                         children: [
-                          IconButton(
-                            icon: Icon(Icons.more_vert,
-                                color: AppTheme.textSub),
-                            onPressed: _openPanel,
+                          _CircleIconButton(
+                            icon: Icons.mail_outline_rounded,
+                            onTap: _showRequestsSheet,
                           ),
                           if (pendingCount > 0)
                             Positioned(
-                              top: 6, right: 6,
+                              top: -2,
+                              right: -2,
                               child: Container(
-                                width: 8, height: 8,
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFFEF4444),
-                                  shape: BoxShape.circle,
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 5, vertical: 1),
+                                constraints: const BoxConstraints(
+                                    minWidth: 16, minHeight: 16),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFEF4444),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                      color: AppTheme.bg, width: 2),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    pendingCount > 9 ? '9+' : '$pendingCount',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 9,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
                         ],
                       ),
+                      const SizedBox(width: 8),
+                      _CircleIconButton(
+                        icon: Icons.more_horiz_rounded,
+                        onTap: _openPanel,
+                      ),
                     ],
                   ),
                 ),
 
-                // ── 내 프로필 ──
+                // ─────────────────────────────────────────
+                // ✨ 내 프로필 카드 — 그라데이션 강조
+                // ─────────────────────────────────────────
                 myProfileAsync.when(
-                  loading: () => const SizedBox(height: 80),
+                  loading: () => const SizedBox(height: 92),
                   error: (_, __) => const SizedBox(),
                   data: (prof) {
-                    final nickname =
-                        prof?['nickname'] as String? ?? '';
-                    final avatar =
-                        prof?['avatar_url'] as String?;
+                    final nickname = prof?['nickname'] as String? ?? '';
+                    final avatar = prof?['avatar_url'] as String?;
                     final statusMessage =
                         prof?['status_message'] as String?;
-                    return InkWell(
-                      onTap: _openMyProfile,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 20, vertical: 14),
-                        decoration: BoxDecoration(
-                          border: Border(
-                              bottom: BorderSide(
-                                  color: AppTheme.border)),
-                        ),
-                        child: Row(
-                          children: [
-                            AvatarWidget(
-                                url:  avatar,
-                                name: nickname,
-                                size: 48),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
-                                children: [
-                                  Text(nickname,
-                                      style: TextStyle(
-                                          fontSize: 16,
-                                          fontWeight:
-                                              FontWeight.w700,
-                                          color:
-                                              AppTheme.textMain)),
-                                  if (statusMessage != null &&
-                                      statusMessage.isNotEmpty) ...[
-                                    const SizedBox(height: 2),
-                                    Text(statusMessage,
-                                        style: TextStyle(
-                                            fontSize: 12,
-                                            color:
-                                                AppTheme.textSub),
-                                        maxLines: 1,
-                                        overflow:
-                                            TextOverflow.ellipsis),
-                                  ],
+                    return Padding(
+                      padding:
+                          const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                      child: Material(
+                        color: Colors.transparent,
+                        child: InkWell(
+                          onTap: _openMyProfile,
+                          borderRadius: BorderRadius.circular(18),
+                          child: Container(
+                            padding: const EdgeInsets.fromLTRB(
+                                14, 14, 18, 14),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  AppTheme.primary.withOpacity(0.10),
+                                  AppTheme.primary.withOpacity(0.03),
                                 ],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
+                              borderRadius: BorderRadius.circular(18),
+                              border: Border.all(
+                                color: AppTheme.primary.withOpacity(0.18),
                               ),
                             ),
-                            Icon(Icons.chevron_right,
-                                color: AppTheme.textSub, size: 20),
-                          ],
+                            child: Row(
+                              children: [
+                                Stack(
+                                  children: [
+                                    AvatarWidget(
+                                      url: avatar,
+                                      name: nickname,
+                                      size: 52,
+                                    ),
+                                    Positioned(
+                                      right: 0,
+                                      bottom: 0,
+                                      child: Container(
+                                        width: 14,
+                                        height: 14,
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF22C55E),
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: AppTheme.bg,
+                                            width: 2,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Flexible(
+                                            child: Text(
+                                              nickname,
+                                              style: TextStyle(
+                                                fontSize: 16,
+                                                fontWeight:
+                                                    FontWeight.w800,
+                                                color:
+                                                    AppTheme.textMain,
+                                              ),
+                                              overflow:
+                                                  TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 6),
+                                          Container(
+                                            padding: const EdgeInsets
+                                                .symmetric(
+                                                horizontal: 6,
+                                                vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: AppTheme.primary
+                                                  .withOpacity(0.15),
+                                              borderRadius:
+                                                  BorderRadius.circular(
+                                                      6),
+                                            ),
+                                            child: Text(
+                                              '나',
+                                              style: TextStyle(
+                                                fontSize: 10,
+                                                fontWeight:
+                                                    FontWeight.w800,
+                                                color:
+                                                    AppTheme.primary,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        statusMessage?.isNotEmpty == true
+                                            ? statusMessage!
+                                            : '상태 메시지를 입력해보세요',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          color:
+                                              statusMessage?.isNotEmpty ==
+                                                      true
+                                                  ? AppTheme.textSub
+                                                  : AppTheme.textMuted,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.bgCard,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                    Icons.arrow_forward_ios_rounded,
+                                    color: AppTheme.textSub,
+                                    size: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ),
                       ),
                     );
                   },
                 ),
 
-                // ── 검색바 ──
+                // ─────────────────────────────────────────
+                // ✨ 검색바 — 포커스 효과 + 더 부드러운 모양
+                // ─────────────────────────────────────────
                 Padding(
-                  padding:
-                      const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                  child: Container(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
                     decoration: BoxDecoration(
                       color: AppTheme.bgCard,
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(color: AppTheme.border),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: _searchFocus.hasFocus
+                            ? AppTheme.primary.withOpacity(0.5)
+                            : AppTheme.border,
+                        width: _searchFocus.hasFocus ? 1.5 : 1,
+                      ),
                     ),
                     child: TextField(
                       controller: _searchController,
-                      onChanged: (v) =>
-                          setState(() => _search = v),
+                      focusNode: _searchFocus,
+                      onChanged: (v) => setState(() => _search = v),
                       style: TextStyle(
                           color: AppTheme.textMain, fontSize: 14),
                       decoration: InputDecoration(
-                        hintText: '친구 검색...',
+                        hintText: '친구 이름으로 검색',
+                        hintStyle: TextStyle(
+                            color: AppTheme.textMuted, fontSize: 14),
                         border: InputBorder.none,
-                        contentPadding:
-                            const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 10),
-                        prefixIcon: Icon(Icons.search,
-                            color: AppTheme.textSub, size: 18),
+                        contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 12),
+                        prefixIcon: Icon(
+                          Icons.search_rounded,
+                          color: _searchFocus.hasFocus
+                              ? AppTheme.primary
+                              : AppTheme.textSub,
+                          size: 20,
+                        ),
                         suffixIcon: _search.isNotEmpty
                             ? IconButton(
-                                icon: Icon(Icons.close,
-                                    color: AppTheme.textSub,
-                                    size: 16),
+                                icon: Icon(Icons.cancel,
+                                    color: AppTheme.textSub, size: 18),
                                 onPressed: () {
                                   _searchController.clear();
                                   setState(() => _search = '');
+                                  _searchFocus.unfocus();
                                 },
                               )
                             : null,
@@ -538,7 +932,9 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                   ),
                 ),
 
-                // ── 추천 + 친구 목록 ──
+                // ─────────────────────────────────────────
+                // 친구 목록
+                // ─────────────────────────────────────────
                 Expanded(
                   child: friendsAsync.when(
                     loading: () => const Center(
@@ -547,8 +943,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                     ),
                     error: (e, _) => Center(
                       child: Text('오류: $e',
-                          style:
-                              TextStyle(color: AppTheme.textSub)),
+                          style: TextStyle(color: AppTheme.textSub)),
                     ),
                     data: (friends) {
                       final filtered = _search.isEmpty
@@ -559,80 +954,152 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                   .contains(_search.toLowerCase()))
                               .toList();
 
+                      // 즐겨찾기 / 일반 분리
+                      final favorites =
+                          filtered.where((f) => f.isFavorite).toList();
+                      final others =
+                          filtered.where((f) => !f.isFavorite).toList();
+
                       return CustomScrollView(
+                        physics: const BouncingScrollPhysics(),
                         slivers: [
+                          // 추천 친구
                           if (_search.isEmpty &&
                               suggestions.isNotEmpty)
                             SliverToBoxAdapter(
                               child: SuggestionsSection(
                                 suggestions: suggestions,
-                                onTap:       _openSuggestedProfile,
-                                onAdd:       _sendSuggestionRequest,
-                                onDismiss:   _dismissSuggestion,
+                                onTap: _openSuggestedProfile,
+                                onAdd: _sendSuggestionRequest,
+                                onDismiss: _dismissSuggestion,
                               ),
                             ),
 
-                          SliverToBoxAdapter(
-                            child: Padding(
-                              padding:
-                                  const EdgeInsets.fromLTRB(
-                                      20, 12, 20, 4),
-                              child: Row(
-                                children: [
-                                  Text('친구 목록',
-                                      style: TextStyle(
-                                          fontSize: 13,
-                                          color: AppTheme.textSub,
-                                          fontWeight:
-                                              FontWeight.w700)),
-                                  const SizedBox(width: 6),
-                                  Text('${friends.length}',
-                                      style: TextStyle(
-                                          fontSize: 13,
-                                          color: AppTheme.textSub,
-                                          fontWeight:
-                                              FontWeight.w700)),
-                                ],
+                          // 즐겨찾기 섹션
+                          if (favorites.isNotEmpty) ...[
+                            SliverToBoxAdapter(
+                              child: _SectionHeader(
+                                icon: Icons.star_rounded,
+                                iconColor: const Color(0xFFFBBF24),
+                                title: '즐겨찾기',
+                                count: favorites.length,
                               ),
                             ),
-                          ),
+                            SliverList(
+                              delegate: SliverChildBuilderDelegate(
+                                (_, i) {
+                                  final friend = favorites[i];
+                                  return FriendTile(
+                                    friend: friend,
+                                    onTap: () => _openProfile(friend),
+                                    onChat: () => _startChat(friend),
+                                    onToggleFavorite: () =>
+                                        _toggleFavorite(friend),
+                                    onReport: () =>
+                                        _showReportSheet(friend),
+                                    onBlock: () => _showBlockConfirm(
+                                        friend.friendId,
+                                        friend.nickname),
+                                    onRemove: () =>
+                                        _confirmRemoveFriend(friend),
+                                  );
+                                },
+                                childCount: favorites.length,
+                              ),
+                            ),
+                          ],
 
+                          // 친구 목록 헤더
+                          if (others.isNotEmpty || filtered.isEmpty)
+                            SliverToBoxAdapter(
+                              child: _SectionHeader(
+                                icon: Icons.people_rounded,
+                                iconColor: AppTheme.textSub,
+                                title: '친구',
+                                count: filtered.isEmpty
+                                    ? friends.length
+                                    : others.length,
+                              ),
+                            ),
+
+                          // 친구 타일들 / 빈 상태
                           if (filtered.isEmpty)
                             SliverFillRemaining(
                               hasScrollBody: false,
-                              child: Center(
-                                child: Column(
-                                  mainAxisAlignment:
-                                      MainAxisAlignment.center,
-                                  children: [
-                                    const Text('👥',
-                                        style:
-                                            TextStyle(fontSize: 48)),
-                                    const SizedBox(height: 16),
-                                    Text(
-                                      _search.isNotEmpty
-                                          ? '"$_search" 검색 결과가 없어요'
-                                          : '아직 친구가 없어요',
-                                      style: TextStyle(
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(
+                                        20, 24, 20, 60),
+                                child: Center(
+                                  child: Column(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.center,
+                                    children: [
+                                      Container(
+                                        width: 80,
+                                        height: 80,
+                                        decoration: BoxDecoration(
+                                          color: AppTheme.bgCard,
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: Icon(
+                                          _search.isNotEmpty
+                                              ? Icons.search_off_rounded
+                                              : Icons.people_outline_rounded,
                                           color: AppTheme.textSub,
-                                          fontSize: 14),
-                                    ),
-                                    const SizedBox(height: 12),
-                                    if (_search.isEmpty)
-                                      TextButton.icon(
-                                        onPressed:
-                                            _showAddFriendDialog,
-                                        icon: const Icon(
-                                            Icons
-                                                .person_add_outlined,
-                                            color: AppTheme.primary,
-                                            size: 18),
-                                        label: const Text('친구 추가',
-                                            style: TextStyle(
-                                                color:
-                                                    AppTheme.primary)),
+                                          size: 38,
+                                        ),
                                       ),
-                                  ],
+                                      const SizedBox(height: 20),
+                                      Text(
+                                        _search.isNotEmpty
+                                            ? '검색 결과가 없어요'
+                                            : '아직 친구가 없어요',
+                                        style: TextStyle(
+                                          color: AppTheme.textMain,
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        _search.isNotEmpty
+                                            ? '"$_search"와 일치하는 친구를 찾지 못했어요'
+                                            : '친구를 추가하고 대화를 시작해보세요',
+                                        style: TextStyle(
+                                          color: AppTheme.textSub,
+                                          fontSize: 12,
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                      if (_search.isEmpty) ...[
+                                        const SizedBox(height: 20),
+                                        ElevatedButton.icon(
+                                          onPressed:
+                                              _showAddFriendDialog,
+                                          icon: const Icon(
+                                              Icons.person_add_rounded,
+                                              size: 18),
+                                          label: const Text('친구 추가하기'),
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor:
+                                                AppTheme.primary,
+                                            foregroundColor: Colors.white,
+                                            elevation: 0,
+                                            padding: const EdgeInsets
+                                                .symmetric(
+                                                horizontal: 20,
+                                                vertical: 12),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(
+                                                      12),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
                                 ),
                               ),
                             )
@@ -640,18 +1107,29 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                             SliverList(
                               delegate: SliverChildBuilderDelegate(
                                 (_, i) {
-                                  final friend = filtered[i];
+                                  final friend = others[i];
                                   return FriendTile(
                                     friend: friend,
-                                    onTap:  () =>
-                                        _openProfile(friend),
-                                    onChat: () =>
-                                        _startChat(friend),
+                                    onTap: () => _openProfile(friend),
+                                    onChat: () => _startChat(friend),
+                                    onToggleFavorite: () =>
+                                        _toggleFavorite(friend),
+                                    onReport: () =>
+                                        _showReportSheet(friend),
+                                    onBlock: () => _showBlockConfirm(
+                                        friend.friendId,
+                                        friend.nickname),
+                                    onRemove: () =>
+                                        _confirmRemoveFriend(friend),
                                   );
                                 },
-                                childCount: filtered.length,
+                                childCount: others.length,
                               ),
                             ),
+
+                          // 하단 여백
+                          const SliverToBoxAdapter(
+                              child: SizedBox(height: 80)),
                         ],
                       );
                     },
@@ -666,44 +1144,114 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
         if (_isPanelOpen)
           GestureDetector(
             onTap: _closePanel,
-            child: Container(color: Colors.black.withOpacity(0.4)),
+            child: Container(color: Colors.black.withOpacity(0.5)),
           ),
 
-        // ── 사이드 패널 본체 ──
+        // ── ✨ 사이드 패널 ──
         if (_isPanelOpen)
           Positioned(
-            top: 0, right: 0, bottom: 0,
-            width: 260,
+            top: 0,
+            right: 0,
+            bottom: 0,
+            width: 280,
             child: SlideTransition(
               position: _panelAnimation,
               child: Material(
-                color: AppTheme.bgCard,
+                color: AppTheme.bg,
+                elevation: 20,
                 child: SafeArea(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      // 헤더
                       Padding(
-                        padding: const EdgeInsets.fromLTRB(
-                            20, 20, 16, 16),
+                        padding:
+                            const EdgeInsets.fromLTRB(20, 20, 12, 8),
                         child: Row(
                           children: [
-                            Text('메뉴',
-                                style: TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.w800,
-                                    color: AppTheme.textMain)),
+                            Text(
+                              '메뉴',
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w900,
+                                color: AppTheme.textMain,
+                                letterSpacing: -0.5,
+                              ),
+                            ),
                             const Spacer(),
-                            IconButton(
-                              icon: Icon(Icons.close,
-                                  color: AppTheme.textSub,
-                                  size: 20),
-                              onPressed: _closePanel,
+                            _CircleIconButton(
+                              icon: Icons.close_rounded,
+                              onTap: _closePanel,
                             ),
                           ],
                         ),
                       ),
-                      Divider(color: AppTheme.border, height: 1),
+
+                      // 미니 프로필 카드
+                      myProfileAsync.maybeWhen(
+                        data: (prof) {
+                          if (prof == null) return const SizedBox();
+                          final nickname =
+                              prof['nickname'] as String? ?? '';
+                          final avatar =
+                              prof['avatar_url'] as String?;
+                          return Padding(
+                            padding: const EdgeInsets.fromLTRB(
+                                16, 8, 16, 16),
+                            child: Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: AppTheme.bgCard,
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: Row(
+                                children: [
+                                  AvatarWidget(
+                                      url: avatar,
+                                      name: nickname,
+                                      size: 40),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          nickname,
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w800,
+                                            color: AppTheme.textMain,
+                                          ),
+                                          overflow:
+                                              TextOverflow.ellipsis,
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          '내 프로필',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: AppTheme.textSub,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                        orElse: () => const SizedBox(),
+                      ),
+
+                      Divider(
+                          color: AppTheme.border,
+                          height: 1,
+                          indent: 16,
+                          endIndent: 16),
                       const SizedBox(height: 8),
+
                       PanelMenuItem(
                         icon: Icons.person_add_outlined,
                         label: '친구 추가',
@@ -738,6 +1286,76 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
             ),
           ),
       ],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// ✨ 보조 위젯들
+// ═══════════════════════════════════════════════
+
+class _CircleIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  const _CircleIconButton({required this.icon, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppTheme.bgCard,
+      shape: const CircleBorder(),
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Icon(icon, color: AppTheme.textMain, size: 20),
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final IconData icon;
+  final Color iconColor;
+  final String title;
+  final int count;
+
+  const _SectionHeader({
+    required this.icon,
+    required this.iconColor,
+    required this.title,
+    required this.count,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 6),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: iconColor),
+          const SizedBox(width: 6),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              color: AppTheme.textMain,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '$count',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: AppTheme.textSub,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

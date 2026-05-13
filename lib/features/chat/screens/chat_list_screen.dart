@@ -13,7 +13,19 @@ import '../../group_chat/providers/group_chat_provider.dart';
 import '../../group_chat/screens/group_chat_room_screen.dart';
 import '../models/chat_room_model.dart';
 import '../providers/chat_provider.dart' as provider;
-import 'my_plans_screen.dart';                                 // ⭐ NEW
+
+// ═══════════════════════════════════════════════════
+// 💬 ChatListScreen — 리디자인
+//
+// 변경:
+// - 헤더: 큰 타이틀 (26pt w900) + 알약 카운트
+// - 검색바: 포커스 효과
+// - 채팅방 카드: 더 부드러운 패딩 + 핀/뮤트 뱃지 개선
+// - 안 읽은 메시지: 그라데이션 배경 + 그림자
+// - 핀된 방: 미묘한 배경 차이
+// - 빈 상태: 일러스트 + CTA
+// - 새 채팅 버튼: FAB 스타일 (오른쪽 상단)
+// ═══════════════════════════════════════════════════
 
 class ChatListScreen extends ConsumerStatefulWidget {
   const ChatListScreen({super.key});
@@ -24,17 +36,19 @@ class ChatListScreen extends ConsumerStatefulWidget {
 
 class _ChatListScreenState extends ConsumerState<ChatListScreen> {
   final _searchController = TextEditingController();
+  final _searchFocus = FocusNode();
   String _search = '';
   final _myId = Supabase.instance.client.auth.currentUser!.id;
   OverlayEntry? _overlayEntry;
-  
+
   Timer? _uiRefreshTimer;
 
   @override
   void initState() {
     super.initState();
     _listenForIncomingMessages();
-    
+    _searchFocus.addListener(() => setState(() {}));
+
     _uiRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
@@ -48,11 +62,11 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
           schema: 'public',
           table: 'kyorangtalk_messages',
           callback: (payload) async {
-            final row      = payload.newRecord;
+            final row = payload.newRecord;
             if (row.isEmpty) return;
             final senderId = row['sender_id'] as String?;
-            final roomId   = row['room_id']   as String?;
-            final content  = row['content']   as String? ?? '';
+            final roomId = row['room_id'] as String?;
+            final content = row['content'] as String? ?? '';
 
             if (senderId == null) return;
             if (senderId == _myId) return;
@@ -71,17 +85,11 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
               final messagePreviewEnabled =
                   prefsData?['message_preview_enabled'] as bool? ?? true;
 
-              if (!notificationsEnabled) {
-                print('🔕 전역 알림 꺼짐 - 앱 내 배너 차단');
-                return;
-              }
+              if (!notificationsEnabled) return;
 
               final muted =
                   await NotificationService.isMuted(roomId: roomId);
-              if (muted) {
-                print('🔕 방 음소거 - 앱 내 배너 차단: $roomId');
-                return;
-              }
+              if (muted) return;
 
               if (!mounted) return;
 
@@ -92,10 +100,7 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                   .eq('blocked_id', senderId)
                   .maybeSingle();
 
-              if (blockCheck != null) {
-                print('🚫 차단한 사용자 - 앱 내 배너 차단');
-                return;
-              }
+              if (blockCheck != null) return;
 
               if (!mounted) return;
 
@@ -106,21 +111,18 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                   .maybeSingle();
 
               if (!mounted) return;
-              final nickname =
-                  profile?['nickname'] as String? ?? '누군가';
+              final nickname = profile?['nickname'] as String? ?? '누군가';
               final rooms =
                   ref.read(provider.chatRoomsProvider).value ?? [];
-              final room = rooms
-                  .where((r) => r.roomId == roomId)
-                  .firstOrNull;
+              final room =
+                  rooms.where((r) => r.roomId == roomId).firstOrNull;
 
               if (room != null) {
                 final displayContent = messagePreviewEnabled
                     ? content
                     : '새 메시지가 도착했어요';
 
-                _showOverlayNotification(
-                    nickname, displayContent, room);
+                _showOverlayNotification(nickname, displayContent, room);
               }
             } catch (e) {
               print('⚠️ 앱 내 알림 처리 실패: $e');
@@ -163,6 +165,7 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
   void dispose() {
     _uiRefreshTimer?.cancel();
     _searchController.dispose();
+    _searchFocus.dispose();
     _overlayEntry?.remove();
     Supabase.instance.client.channel('inbox_$_myId').unsubscribe();
     super.dispose();
@@ -172,15 +175,15 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
     final nowUtc = DateTime.now().toUtc();
     final dtUtc = dt.isUtc ? dt : dt.toUtc();
     var diff = nowUtc.difference(dtUtc);
-    
+
     if (diff.isNegative) {
       diff = Duration.zero;
     }
-    
+
     if (diff.inSeconds < 60) return '방금';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}분 전';
-    if (diff.inHours < 24) return '${diff.inHours}시간 전';
-    if (diff.inDays < 7) return '${diff.inDays}일 전';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}분';
+    if (diff.inHours < 24) return '${diff.inHours}시간';
+    if (diff.inDays < 7) return '${diff.inDays}일';
     final local = dt.isUtc ? dt.toLocal() : dt;
     return DateFormat('M/d').format(local);
   }
@@ -214,130 +217,263 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
     );
   }
 
-  // ⭐ NEW: 내 약속 페이지로 이동
-  void _openMyPlans() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => const MyPlansScreen(),
+  void _showRoomActionSheet(ChatRoomModel room) {
+    final mutedRooms = ref.read(mutedRoomsProvider).value ?? {};
+    final isMuted = mutedRooms.contains(room.roomId);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _RoomActionSheet(
+        room: room,
+        isMuted: isMuted,
+        onToggleMute: () {
+          Navigator.pop(context);
+          _toggleMute(room, isMuted);
+        },
+        onTogglePin: () {
+          Navigator.pop(context);
+          _togglePin(room);
+        },
+        onLeave: () {
+          Navigator.pop(context);
+          _confirmLeaveRoom(room);
+        },
       ),
     );
   }
 
+  Future<void> _toggleMute(ChatRoomModel room, bool currentlyMuted) async {
+    try {
+      if (currentlyMuted) {
+        await NotificationService.unmute(roomId: room.roomId);
+      } else {
+        await NotificationService.mute(roomId: room.roomId);
+      }
+      ref.invalidate(mutedRoomsProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(currentlyMuted
+                ? '${room.partnerName}님 알림을 켰어요'
+                : '${room.partnerName}님 알림을 껐어요'),
+            backgroundColor: AppTheme.bgCard,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('알림 설정 실패: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _togglePin(ChatRoomModel room) async {
+    try {
+      final isNowPinned = await provider.togglePinRoom(room.roomId);
+      ref.invalidate(provider.chatRoomsProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(isNowPinned
+                ? '${room.partnerName}님 채팅방을 상단 고정했어요'
+                : '${room.partnerName}님 채팅방 고정을 해제했어요'),
+            backgroundColor: AppTheme.bgCard,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('고정 실패: $e')),
+        );
+      }
+    }
+  }
+
+  void _confirmLeaveRoom(ChatRoomModel room) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.bgCard,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          '채팅방 나가기',
+          style: TextStyle(
+            color: AppTheme.textMain,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        content: Text(
+          '${room.partnerName}님과의 채팅방에서 나갈까요?\n'
+          '내 채팅 목록에서만 사라지고, 상대방은 그대로예요.',
+          style: TextStyle(color: AppTheme.textSub, fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('취소', style: TextStyle(color: AppTheme.textSub)),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await _leaveRoom(room);
+            },
+            child: const Text(
+              '나가기',
+              style: TextStyle(
+                color: Color(0xFFEF4444),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _leaveRoom(ChatRoomModel room) async {
+    try {
+      await provider.hideChatRoom(room.roomId);
+      ref.invalidate(provider.chatRoomsProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('채팅방을 나갔어요'),
+            backgroundColor: AppTheme.bgCard,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('나가기 실패: $e')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final roomsAsync  = ref.watch(provider.chatRoomsProvider);
-    final mutedAsync  = ref.watch(mutedRoomsProvider);
-    final mutedRooms  = mutedAsync.value ?? {};
+    final roomsAsync = ref.watch(provider.chatRoomsProvider);
+    final mutedAsync = ref.watch(mutedRoomsProvider);
+    final mutedRooms = mutedAsync.value ?? {};
 
     final totalUnread = roomsAsync.value
             ?.where((r) => !mutedRooms.contains(r.roomId))
-            .fold(0, (s, r) => s + r.unreadCount) ?? 0;
+            .fold(0, (s, r) => s + r.unreadCount) ??
+        0;
 
     return Scaffold(
       backgroundColor: AppTheme.bg,
       body: SafeArea(
         child: Column(
           children: [
-            Container(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
-              decoration: BoxDecoration(
-                border: Border(
-                    bottom: BorderSide(color: AppTheme.border)),
-              ),
-              child: Column(
+            // ─────────────────────────────────────────
+            // ✨ 헤더 — 큰 타이틀 + 알약 + 새 채팅 버튼
+            // ─────────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 18, 16, 12),
+              child: Row(
                 children: [
-                  Row(
-                    children: [
-                      Text('메시지',
-                          style: TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.w800,
-                              color: AppTheme.textMain)),
-                      if (totalUnread > 0) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFEF4444),
-                            borderRadius:
-                                BorderRadius.circular(20),
-                          ),
-                          child: Text('$totalUnread',
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w800)),
-                        ),
-                      ],
-                      const Spacer(),
-                      // ⭐ NEW: 약속 페이지 버튼
-                      GestureDetector(
-                        onTap: _openMyPlans,
-                        child: Container(
-                          padding: const EdgeInsets.all(8),
-                          margin: const EdgeInsets.only(right: 8),
-                          decoration: BoxDecoration(
-                            color: AppTheme.primary.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Icon(
-                            Icons.event_note_outlined,
-                            color: AppTheme.primary,
-                            size: 20,
-                          ),
-                        ),
-                      ),
-                      GestureDetector(
-                        onTap: _showNewChatSheet,
-                        child: Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: AppTheme.primary.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Icon(
-                            Icons.edit_square,
-                            color: AppTheme.primary,
-                            size: 20,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Container(
-                    decoration: BoxDecoration(
-                      color: AppTheme.bgCard,
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(color: AppTheme.border),
+                  Text(
+                    '메시지',
+                    style: TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.w900,
+                      color: AppTheme.textMain,
+                      letterSpacing: -0.5,
                     ),
-                    child: TextField(
-                      controller: _searchController,
-                      onChanged: (v) =>
-                          setState(() => _search = v),
-                      style: TextStyle(
-                          color: AppTheme.textMain, fontSize: 14),
-                      decoration: InputDecoration(
-                        hintText: '대화 검색...',
-                        border: InputBorder.none,
-                        contentPadding:
-                            const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 12),
-                        prefixIcon: Icon(Icons.search,
-                            color: AppTheme.textSub, size: 18),
-                        suffixIcon: _search.isNotEmpty
-                            ? IconButton(
-                                icon: Icon(Icons.close,
-                                    color: AppTheme.textSub,
-                                    size: 16),
-                                onPressed: () {
-                                  _searchController.clear();
-                                  setState(() => _search = '');
-                                },
-                              )
-                            : null,
+                  ),
+                  const SizedBox(width: 8),
+                  if (totalUnread > 0)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [
+                            Color(0xFFEF4444),
+                            Color(0xFFDC2626),
+                          ],
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFFEF4444)
+                                .withOpacity(0.4),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Text(
+                        totalUnread > 99 ? '99+' : '$totalUnread',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  const Spacer(),
+                  // 새 채팅 버튼 — 더 부각된 디자인
+                  Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: _showNewChatSheet,
+                      borderRadius: BorderRadius.circular(14),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              AppTheme.primary,
+                              AppTheme.primary.withOpacity(0.85),
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(14),
+                          boxShadow: [
+                            BoxShadow(
+                              color:
+                                  AppTheme.primary.withOpacity(0.3),
+                              blurRadius: 10,
+                              offset: const Offset(0, 3),
+                            ),
+                          ],
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.edit_square,
+                              color: Colors.white,
+                              size: 16,
+                            ),
+                            SizedBox(width: 6),
+                            Text(
+                              '새 채팅',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -345,93 +481,102 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
               ),
             ),
 
+            // ─────────────────────────────────────────
+            // ✨ 검색바 — 포커스 효과
+            // ─────────────────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                decoration: BoxDecoration(
+                  color: AppTheme.bgCard,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: _searchFocus.hasFocus
+                        ? AppTheme.primary.withOpacity(0.5)
+                        : AppTheme.border,
+                    width: _searchFocus.hasFocus ? 1.5 : 1,
+                  ),
+                ),
+                child: TextField(
+                  controller: _searchController,
+                  focusNode: _searchFocus,
+                  onChanged: (v) => setState(() => _search = v),
+                  style: TextStyle(
+                      color: AppTheme.textMain, fontSize: 14),
+                  decoration: InputDecoration(
+                    hintText: '대화 검색',
+                    hintStyle: TextStyle(
+                        color: AppTheme.textMuted, fontSize: 14),
+                    border: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 12),
+                    prefixIcon: Icon(
+                      Icons.search_rounded,
+                      color: _searchFocus.hasFocus
+                          ? AppTheme.primary
+                          : AppTheme.textSub,
+                      size: 20,
+                    ),
+                    suffixIcon: _search.isNotEmpty
+                        ? IconButton(
+                            icon: Icon(Icons.cancel,
+                                color: AppTheme.textSub, size: 18),
+                            onPressed: () {
+                              _searchController.clear();
+                              setState(() => _search = '');
+                              _searchFocus.unfocus();
+                            },
+                          )
+                        : null,
+                  ),
+                ),
+              ),
+            ),
+
+            // ─────────────────────────────────────────
+            // 채팅 목록
+            // ─────────────────────────────────────────
             Expanded(
               child: roomsAsync.when(
                 loading: () => const ChatListSkeleton(),
-                error: (e, _) => Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.error_outline,
-                          color: AppTheme.textSub, size: 40),
-                      const SizedBox(height: 12),
-                      Text('불러오기 실패',
-                          style: TextStyle(
-                              color: AppTheme.textSub,
-                              fontSize: 14)),
-                      const SizedBox(height: 12),
-                      TextButton(
-                        onPressed: () =>
-                            ref.invalidate(provider.chatRoomsProvider),
-                        child: const Text('다시 시도',
-                            style: TextStyle(
-                                color: AppTheme.primary)),
-                      ),
-                    ],
-                  ),
+                error: (e, _) => _ErrorState(
+                  onRetry: () =>
+                      ref.invalidate(provider.chatRoomsProvider),
                 ),
                 data: (rooms) {
                   final filtered = _search.isEmpty
                       ? rooms
                       : rooms
                           .where((r) =>
-                              r.partnerName
-                                  .toLowerCase()
-                                  .contains(
-                                      _search.toLowerCase()) ||
-                              r.partnerUsername
-                                  .toLowerCase()
-                                  .contains(
-                                      _search.toLowerCase()))
+                              r.partnerName.toLowerCase().contains(
+                                  _search.toLowerCase()) ||
+                              r.partnerUsername.toLowerCase().contains(
+                                  _search.toLowerCase()))
                           .toList();
 
                   if (filtered.isEmpty) {
-                    return Center(
-                      child: Column(
-                        mainAxisAlignment:
-                            MainAxisAlignment.center,
-                        children: [
-                          const Text('💬',
-                              style:
-                                  TextStyle(fontSize: 48)),
-                          const SizedBox(height: 16),
-                          Text(
-                            _search.isNotEmpty
-                                ? '"$_search" 검색 결과가 없어요'
-                                : '아직 대화가 없어요',
-                            style: TextStyle(
-                                color: AppTheme.textSub,
-                                fontSize: 14),
-                          ),
-                          if (_search.isEmpty) ...[
-                            const SizedBox(height: 16),
-                            TextButton.icon(
-                              onPressed: _showNewChatSheet,
-                              icon: const Icon(
-                                  Icons.edit_square,
-                                  color: AppTheme.primary,
-                                  size: 18),
-                              label: const Text('새 채팅 시작하기',
-                                  style: TextStyle(
-                                      color: AppTheme.primary,
-                                      fontWeight: FontWeight.w600)),
-                            ),
-                          ],
-                        ],
-                      ),
+                    return _EmptyState(
+                      isSearching: _search.isNotEmpty,
+                      searchQuery: _search,
+                      onNewChat: _showNewChatSheet,
                     );
                   }
 
                   return ListView.builder(
+                    padding: const EdgeInsets.only(top: 4, bottom: 80),
+                    physics: const BouncingScrollPhysics(),
                     itemCount: filtered.length,
                     itemBuilder: (_, i) {
                       final room = filtered[i];
-                      final isMuted =
-                          mutedRooms.contains(room.roomId);
-                      final isUnread =
-                          room.unreadCount > 0 && !isMuted;
+                      final isMuted = mutedRooms.contains(room.roomId);
+                      final isUnread = room.unreadCount > 0 && !isMuted;
 
-                      return InkWell(
+                      return _ChatRoomTile(
+                        room: room,
+                        isMuted: isMuted,
+                        isUnread: isUnread,
+                        timeLabel: _timeAgo(room.lastTime),
                         onTap: () {
                           provider.currentOpenRoomId = room.roomId;
                           context
@@ -444,145 +589,7 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                                 ref.invalidate(mutedRoomsProvider);
                               });
                         },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 20, vertical: 14),
-                          decoration: BoxDecoration(
-                            color: isUnread
-                                ? AppTheme.primary.withOpacity(0.08)
-                                : Colors.transparent,
-                            border: Border(
-                              bottom: BorderSide(
-                                  color: AppTheme.border),
-                            ),
-                          ),
-                          child: Row(
-                            crossAxisAlignment:
-                                CrossAxisAlignment.center,
-                            children: [
-                              AvatarWidget(
-                                url: room.partnerAvatar,
-                                name: room.partnerName,
-                                size: 50,
-                              ),
-                              const SizedBox(width: 14),
-
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Row(
-                                      children: [
-                                        Flexible(
-                                          child: Text(
-                                            room.partnerName,
-                                            style: TextStyle(
-                                              fontSize: 15,
-                                              fontWeight: isUnread
-                                                  ? FontWeight.w800
-                                                  : FontWeight.w600,
-                                              color: AppTheme
-                                                  .textMain,
-                                            ),
-                                            overflow: TextOverflow
-                                                .ellipsis,
-                                          ),
-                                        ),
-                                        if (isMuted) ...[
-                                          const SizedBox(width: 4),
-                                          Icon(
-                                              Icons
-                                                  .notifications_off,
-                                              color: AppTheme
-                                                  .textSub,
-                                              size: 13),
-                                        ],
-                                      ],
-                                    ),
-                                    const SizedBox(height: 3),
-                                    Text(
-                                      room.lastMessage.isEmpty
-                                          ? '대화를 시작해보세요'
-                                          : room.lastMessage,
-                                      maxLines: 1,
-                                      overflow:
-                                          TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        color: isUnread
-                                            ? AppTheme.textMain
-                                            : AppTheme.textSub,
-                                        fontWeight: isUnread
-                                            ? FontWeight.w600
-                                            : FontWeight.normal,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-
-                              const SizedBox(width: 8),
-
-                              Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.end,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    _timeAgo(room.lastTime),
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: isUnread
-                                          ? const Color(
-                                              0xFFEF4444)
-                                          : AppTheme.textMuted,
-                                      fontWeight: isUnread
-                                          ? FontWeight.w700
-                                          : FontWeight.normal,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  if (room.unreadCount > 0)
-                                    Container(
-                                      padding: const EdgeInsets
-                                          .symmetric(
-                                          horizontal: 6,
-                                          vertical: 2),
-                                      decoration: BoxDecoration(
-                                        color: isMuted
-                                            ? AppTheme.textSub
-                                            : const Color(
-                                                0xFFEF4444),
-                                        borderRadius:
-                                            BorderRadius.circular(
-                                                10),
-                                      ),
-                                      constraints:
-                                          const BoxConstraints(
-                                        minWidth: 20,
-                                        minHeight: 18,
-                                      ),
-                                      child: Text(
-                                        '${room.unreadCount}',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 10,
-                                          fontWeight:
-                                              FontWeight.w800,
-                                        ),
-                                        textAlign:
-                                            TextAlign.center,
-                                      ),
-                                    )
-                                  else
-                                    const SizedBox(height: 18),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
+                        onLongPress: () => _showRoomActionSheet(room),
                       );
                     },
                   );
@@ -596,6 +603,546 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
   }
 }
 
+// ═══════════════════════════════════════════════════
+// ✨ 채팅방 타일 — 새 디자인
+// ═══════════════════════════════════════════════════
+class _ChatRoomTile extends StatelessWidget {
+  final ChatRoomModel room;
+  final bool isMuted;
+  final bool isUnread;
+  final String timeLabel;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
+
+  const _ChatRoomTile({
+    required this.room,
+    required this.isMuted,
+    required this.isUnread,
+    required this.timeLabel,
+    required this.onTap,
+    required this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        onLongPress: onLongPress,
+        child: Container(
+          margin: const EdgeInsets.symmetric(
+              horizontal: 12, vertical: 2),
+          padding: const EdgeInsets.symmetric(
+              horizontal: 12, vertical: 12),
+          decoration: BoxDecoration(
+            color: isUnread
+                ? AppTheme.primary.withOpacity(0.08)
+                : room.isPinned
+                    ? AppTheme.bgCard.withOpacity(0.4)
+                    : Colors.transparent,
+            borderRadius: BorderRadius.circular(14),
+            border: isUnread
+                ? Border.all(
+                    color: AppTheme.primary.withOpacity(0.2),
+                    width: 1,
+                  )
+                : null,
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // ─── 아바타 (안 읽음 시 반짝이는 효과)
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: isUnread
+                          ? [
+                              BoxShadow(
+                                color: AppTheme.primary
+                                    .withOpacity(0.4),
+                                blurRadius: 12,
+                                spreadRadius: 1,
+                              ),
+                            ]
+                          : null,
+                    ),
+                    child: AvatarWidget(
+                      url: room.partnerAvatar,
+                      name: room.partnerName,
+                      size: 52,
+                    ),
+                  ),
+                  // 핀 뱃지
+                  if (room.isPinned)
+                    Positioned(
+                      bottom: -2,
+                      right: -2,
+                      child: Container(
+                        padding: const EdgeInsets.all(3),
+                        decoration: BoxDecoration(
+                          color: AppTheme.primary,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: AppTheme.bg, width: 2),
+                        ),
+                        child: const Icon(
+                          Icons.push_pin_rounded,
+                          color: Colors.white,
+                          size: 9,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+
+              const SizedBox(width: 14),
+
+              // ─── 이름 + 메시지
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            room.partnerName,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: isUnread
+                                  ? FontWeight.w800
+                                  : FontWeight.w700,
+                              color: AppTheme.textMain,
+                              letterSpacing: -0.2,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (isMuted) ...[
+                          const SizedBox(width: 5),
+                          Icon(
+                            Icons.notifications_off_rounded,
+                            color: AppTheme.textMuted,
+                            size: 13,
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      room.lastMessage.isEmpty
+                          ? '대화를 시작해보세요'
+                          : room.lastMessage,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: isUnread
+                            ? AppTheme.textMain
+                            : room.lastMessage.isEmpty
+                                ? AppTheme.textMuted
+                                : AppTheme.textSub,
+                        fontWeight: isUnread
+                            ? FontWeight.w600
+                            : FontWeight.normal,
+                        height: 1.3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(width: 8),
+
+              // ─── 시간 + 안 읽은 수
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    timeLabel,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isUnread
+                          ? AppTheme.primary
+                          : AppTheme.textMuted,
+                      fontWeight: isUnread
+                          ? FontWeight.w800
+                          : FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  if (room.unreadCount > 0)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 7, vertical: 3),
+                      decoration: BoxDecoration(
+                        gradient: isMuted
+                            ? null
+                            : const LinearGradient(
+                                colors: [
+                                  Color(0xFFEF4444),
+                                  Color(0xFFDC2626),
+                                ],
+                              ),
+                        color: isMuted ? AppTheme.textSub : null,
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: isMuted
+                            ? null
+                            : [
+                                BoxShadow(
+                                  color: const Color(0xFFEF4444)
+                                      .withOpacity(0.4),
+                                  blurRadius: 6,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
+                      ),
+                      constraints: const BoxConstraints(
+                        minWidth: 22,
+                        minHeight: 20,
+                      ),
+                      child: Text(
+                        room.unreadCount > 99
+                            ? '99+'
+                            : '${room.unreadCount}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: -0.3,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    )
+                  else
+                    const SizedBox(height: 20),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// ✨ 빈 상태
+// ═══════════════════════════════════════════════════
+class _EmptyState extends StatelessWidget {
+  final bool isSearching;
+  final String searchQuery;
+  final VoidCallback onNewChat;
+
+  const _EmptyState({
+    required this.isSearching,
+    required this.searchQuery,
+    required this.onNewChat,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 84,
+              height: 84,
+              decoration: BoxDecoration(
+                color: AppTheme.bgCard,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                isSearching
+                    ? Icons.search_off_rounded
+                    : Icons.chat_bubble_outline_rounded,
+                color: AppTheme.textSub,
+                size: 40,
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              isSearching ? '검색 결과가 없어요' : '아직 대화가 없어요',
+              style: TextStyle(
+                color: AppTheme.textMain,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              isSearching
+                  ? '"$searchQuery"와 일치하는 대화를 찾지 못했어요'
+                  : '친구와 대화를 시작해보세요',
+              style: TextStyle(
+                color: AppTheme.textSub,
+                fontSize: 13,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            if (!isSearching) ...[
+              const SizedBox(height: 20),
+              ElevatedButton.icon(
+                onPressed: onNewChat,
+                icon: const Icon(Icons.edit_square, size: 18),
+                label: const Text('새 채팅 시작하기'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.primary,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 20, vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// 에러 상태
+// ═══════════════════════════════════════════════════
+class _ErrorState extends StatelessWidget {
+  final VoidCallback onRetry;
+
+  const _ErrorState({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 70,
+            height: 70,
+            decoration: BoxDecoration(
+              color: AppTheme.bgCard,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.error_outline_rounded,
+              color: AppTheme.textSub,
+              size: 32,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '불러오기 실패',
+            style: TextStyle(
+              color: AppTheme.textMain,
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 12),
+          ElevatedButton(
+            onPressed: onRetry,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.primary,
+              foregroundColor: Colors.white,
+              elevation: 0,
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 20, vertical: 10),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            child: const Text('다시 시도'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// 채팅방 액션 시트
+// ═══════════════════════════════════════════════════
+class _RoomActionSheet extends StatelessWidget {
+  final ChatRoomModel room;
+  final bool isMuted;
+  final VoidCallback onToggleMute;
+  final VoidCallback onTogglePin;
+  final VoidCallback onLeave;
+
+  const _RoomActionSheet({
+    required this.room,
+    required this.isMuted,
+    required this.onToggleMute,
+    required this.onTogglePin,
+    required this.onLeave,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(top: 12, bottom: 12),
+              decoration: BoxDecoration(
+                color: AppTheme.border,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+              child: Row(
+                children: [
+                  AvatarWidget(
+                    url: room.partnerAvatar,
+                    name: room.partnerName,
+                    size: 40,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          room.partnerName,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            color: AppTheme.textMain,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (room.lastMessage.isNotEmpty)
+                          Text(
+                            room.lastMessage,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppTheme.textSub,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            Divider(color: AppTheme.border, height: 1),
+
+            _ActionRow(
+              icon: isMuted
+                  ? Icons.notifications_active_outlined
+                  : Icons.notifications_off_outlined,
+              iconColor: AppTheme.textMain,
+              label: isMuted ? '알림 켜기' : '알림 끄기',
+              labelColor: AppTheme.textMain,
+              onTap: onToggleMute,
+            ),
+
+            _ActionRow(
+              icon: room.isPinned
+                  ? Icons.push_pin
+                  : Icons.push_pin_outlined,
+              iconColor:
+                  room.isPinned ? AppTheme.primary : AppTheme.textMain,
+              label: room.isPinned ? '상단 고정 해제' : '상단 고정',
+              labelColor: AppTheme.textMain,
+              onTap: onTogglePin,
+            ),
+
+            Divider(
+                color: AppTheme.border,
+                height: 1,
+                indent: 20,
+                endIndent: 20),
+
+            _ActionRow(
+              icon: Icons.exit_to_app_rounded,
+              iconColor: const Color(0xFFEF4444),
+              label: '채팅방 나가기',
+              labelColor: const Color(0xFFEF4444),
+              onTap: onLeave,
+            ),
+
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ActionRow extends StatelessWidget {
+  final IconData icon;
+  final Color iconColor;
+  final String label;
+  final Color labelColor;
+  final VoidCallback onTap;
+
+  const _ActionRow({
+    required this.icon,
+    required this.iconColor,
+    required this.label,
+    required this.labelColor,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding:
+            const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        child: Row(
+          children: [
+            Icon(icon, color: iconColor, size: 20),
+            const SizedBox(width: 14),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: labelColor,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// 새 채팅 시트 (기존 그대로)
+// ═══════════════════════════════════════════════════
 class _NewChatSheet extends ConsumerStatefulWidget {
   final String myId;
   final void Function(dynamic room, bool isGroup) onChatCreated;
@@ -674,7 +1221,8 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
       String roomId;
       if (existing != null) {
         roomId = existing['id'] as String;
-        final hiddenBy = (existing['hidden_by'] as List?)?.cast<String>() ?? [];
+        final hiddenBy =
+            (existing['hidden_by'] as List?)?.cast<String>() ?? [];
         if (hiddenBy.contains(widget.myId)) {
           hiddenBy.remove(widget.myId);
           await supabase
@@ -695,15 +1243,15 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
       }
 
       final room = ChatRoomModel(
-        partnerId:       friend.friendId,
+        partnerId: friend.friendId,
         partnerUsername: friend.nickname,
-        partnerName:     friend.nickname,
-        partnerAvatar:   friend.avatarUrl,
-        lastMessage:     '',
-        lastTime:        DateTime.now(),
-        unreadCount:     0,
-        isSent:          false,
-        roomId:          roomId,
+        partnerName: friend.nickname,
+        partnerAvatar: friend.avatarUrl,
+        lastMessage: '',
+        lastTime: DateTime.now(),
+        unreadCount: 0,
+        isSent: false,
+        roomId: roomId,
       );
 
       if (mounted) widget.onChatCreated(room, false);
@@ -715,7 +1263,8 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
     }
   }
 
-  Future<void> _createGroup(String name, List<FriendModel> allFriends) async {
+  Future<void> _createGroup(
+      String name, List<FriendModel> allFriends) async {
     try {
       final memberIds = _selectedIds.toList();
 
@@ -756,14 +1305,14 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
       builder: (_, scrollController) => Column(
         children: [
           Container(
-            width: 36, height: 4,
+            width: 36,
+            height: 4,
             margin: const EdgeInsets.symmetric(vertical: 12),
             decoration: BoxDecoration(
               color: AppTheme.border,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
-
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
             child: Row(
@@ -771,9 +1320,10 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
                 Text(
                   _showGroupNameInput ? '채팅방 이름' : '새 채팅',
                   style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w800,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
                     color: AppTheme.textMain,
+                    letterSpacing: -0.3,
                   ),
                 ),
                 const Spacer(),
@@ -797,7 +1347,6 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
               ],
             ),
           ),
-
           if (_showGroupNameInput) ...[
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -825,7 +1374,8 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
                       style: TextStyle(color: AppTheme.textMain),
                       decoration: InputDecoration(
                         hintText: '채팅방 이름 입력 (예: 우리 가족)',
-                        hintStyle: TextStyle(color: AppTheme.textSub),
+                        hintStyle:
+                            TextStyle(color: AppTheme.textSub),
                         border: InputBorder.none,
                         contentPadding: const EdgeInsets.symmetric(
                             horizontal: 16, vertical: 14),
@@ -843,7 +1393,7 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
               child: Container(
                 decoration: BoxDecoration(
                   color: AppTheme.bg,
-                  borderRadius: BorderRadius.circular(24),
+                  borderRadius: BorderRadius.circular(14),
                   border: Border.all(color: AppTheme.border),
                 ),
                 child: TextField(
@@ -852,16 +1402,18 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
                   style: TextStyle(
                       color: AppTheme.textMain, fontSize: 14),
                   decoration: InputDecoration(
-                    hintText: '친구 검색...',
+                    hintText: '친구 검색',
+                    hintStyle: TextStyle(
+                        color: AppTheme.textMuted, fontSize: 14),
                     border: InputBorder.none,
                     contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                    prefixIcon: Icon(Icons.search,
-                        color: AppTheme.textSub, size: 18),
+                        horizontal: 14, vertical: 12),
+                    prefixIcon: Icon(Icons.search_rounded,
+                        color: AppTheme.textSub, size: 20),
                     suffixIcon: _search.isNotEmpty
                         ? IconButton(
-                            icon: Icon(Icons.close,
-                                color: AppTheme.textSub, size: 16),
+                            icon: Icon(Icons.cancel,
+                                color: AppTheme.textSub, size: 18),
                             onPressed: () {
                               _searchController.clear();
                               setState(() => _search = '');
@@ -872,9 +1424,7 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
                 ),
               ),
             ),
-
             Divider(color: AppTheme.border, height: 1),
-
             Expanded(
               child: friendsAsync.when(
                 loading: () => const Center(
@@ -960,20 +1510,21 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
                                         style: TextStyle(
                                             fontSize: 15,
                                             fontWeight:
-                                                FontWeight.w600,
-                                            color: AppTheme
-                                                .textMain)),
-                                    if (friend.statusMessage != null &&
+                                                FontWeight.w700,
+                                            color:
+                                                AppTheme.textMain)),
+                                    if (friend.statusMessage !=
+                                            null &&
                                         friend.statusMessage!
                                             .isNotEmpty)
                                       Text(friend.statusMessage!,
                                           style: TextStyle(
                                               fontSize: 11,
-                                              color: AppTheme
-                                                  .textSub),
+                                              color:
+                                                  AppTheme.textSub),
                                           maxLines: 1,
-                                          overflow: TextOverflow
-                                              .ellipsis),
+                                          overflow:
+                                              TextOverflow.ellipsis),
                                   ],
                                 ),
                               ),
@@ -987,15 +1538,14 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
               ),
             ),
           ],
-
           SafeArea(
             top: false,
             child: Container(
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
               decoration: BoxDecoration(
                 color: AppTheme.bgCard,
-                border: Border(
-                    top: BorderSide(color: AppTheme.border)),
+                border:
+                    Border(top: BorderSide(color: AppTheme.border)),
               ),
               child: Row(
                 children: [
@@ -1061,7 +1611,7 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
                                           : '채팅 시작',
                               style: const TextStyle(
                                   fontSize: 14,
-                                  fontWeight: FontWeight.w700),
+                                  fontWeight: FontWeight.w800),
                             ),
                     ),
                   ),
@@ -1075,6 +1625,9 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
   }
 }
 
+// ═══════════════════════════════════════════════════
+// 상단 알림 배너
+// ═══════════════════════════════════════════════════
 class _TopNotificationBanner extends StatefulWidget {
   final String senderName;
   final String content;
@@ -1138,31 +1691,43 @@ class _TopNotificationBannerState
             onTap: widget.onTap,
             child: Container(
               padding: const EdgeInsets.symmetric(
-                  horizontal: 16, vertical: 12),
+                  horizontal: 14, vertical: 12),
               decoration: BoxDecoration(
                 color: AppTheme.bgCard,
                 borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: AppTheme.border),
+                border: Border.all(
+                    color: AppTheme.primary.withOpacity(0.3)),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withOpacity(0.2),
-                    blurRadius: 20,
-                    offset: const Offset(0, 4),
+                    color: Colors.black.withOpacity(0.25),
+                    blurRadius: 24,
+                    offset: const Offset(0, 6),
                   ),
                 ],
               ),
               child: Row(
                 children: [
-                  AvatarWidget(
-                    url: widget.room.partnerAvatar,
-                    name: widget.room.partnerName,
-                    size: 40,
+                  Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppTheme.primary.withOpacity(0.3),
+                          blurRadius: 10,
+                          spreadRadius: 1,
+                        ),
+                      ],
+                    ),
+                    child: AvatarWidget(
+                      url: widget.room.partnerAvatar,
+                      name: widget.room.partnerName,
+                      size: 40,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
-                      crossAxisAlignment:
-                          CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Text(widget.senderName,
@@ -1187,8 +1752,15 @@ class _TopNotificationBannerState
                   const SizedBox(width: 8),
                   GestureDetector(
                     onTap: widget.onDismiss,
-                    child: Icon(Icons.close,
-                        color: AppTheme.textSub, size: 18),
+                    child: Container(
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: AppTheme.bg,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(Icons.close_rounded,
+                          color: AppTheme.textSub, size: 14),
+                    ),
                   ),
                 ],
               ),
