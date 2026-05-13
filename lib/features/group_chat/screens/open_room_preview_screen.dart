@@ -1,13 +1,19 @@
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../models/group_room_model.dart';
 import '../providers/group_chat_provider.dart';
-import '../widgets/password_dialog.dart';                       // ⭐ NEW
+import '../widgets/password_dialog.dart';
 import 'profile_select_screen.dart';
+
+// ═══════════════════════════════════════════════════
+// 🏛 OpenRoomPreviewScreen — 실시간 인원수 + 시네마틱
+// ═══════════════════════════════════════════════════
 
 class OpenRoomPreviewScreen extends ConsumerStatefulWidget {
   final GroupRoomModel room;
@@ -27,14 +33,58 @@ class _OpenRoomPreviewScreenState
   bool _joining = false;
   bool _liking = false;
 
-  Future<void> _goToRoom() async {
-    Navigator.pop(context);
-    context.push('/main/group/${widget.room.id}', extra: widget.room);
+  // ⭐ 실시간 구독
+  RealtimeChannel? _memberChannel;
+
+  @override
+  void initState() {
+    super.initState();
+    _subscribeMemberChanges();
   }
 
-  // ⭐⭐⭐ 새로 입장 (비번 보호 + 프로필 선택)
+  @override
+  void dispose() {
+    if (_memberChannel != null) {
+      Supabase.instance.client.removeChannel(_memberChannel!);
+    }
+    super.dispose();
+  }
+
+  // ⭐ 멤버 변경 실시간 감지
+  void _subscribeMemberChanges() {
+    try {
+      _memberChannel = Supabase.instance.client
+          .channel('preview_members_${widget.room.id}')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'kyorangtalk_group_members',
+            filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'room_id',
+              value: widget.room.id,
+            ),
+            callback: (_) {
+              if (mounted) {
+                ref.invalidate(roomDetailProvider(widget.room.id));
+                ref.invalidate(
+                    isRoomMemberProvider(widget.room.id));
+              }
+            },
+          )
+          .subscribe();
+    } catch (e) {
+      print('프리뷰 멤버 채널 구독 실패: $e');
+    }
+  }
+
+  Future<void> _goToRoom() async {
+    Navigator.pop(context);
+    context.push('/main/group/${widget.room.id}',
+        extra: widget.room);
+  }
+
   Future<void> _joinRoom() async {
-    // 1) 프로필 선택
     final selection = await Navigator.push<ProfileSelection>(
       context,
       MaterialPageRoute(
@@ -49,13 +99,11 @@ class _OpenRoomPreviewScreenState
     setState(() => _joining = true);
 
     try {
-      // 2) 비번 보호 여부 확인 (캐시 안 믿고 서버에서 다시)
       final needsPw = await roomRequiresPassword(widget.room.id);
 
       String? password;
       String? errorMsg;
 
-      // 비번이 필요하면 입력 받기 (틀리면 재시도)
       while (needsPw) {
         if (!mounted) return;
         password = await showRoomPasswordDialog(
@@ -64,7 +112,6 @@ class _OpenRoomPreviewScreenState
           errorMessage: errorMsg,
         );
         if (password == null) {
-          // 취소
           setState(() => _joining = false);
           return;
         }
@@ -78,9 +125,7 @@ class _OpenRoomPreviewScreenState
         if (result == JoinResult.ok) break;
         if (result == JoinResult.notFound) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('방을 찾을 수 없어요')),
-            );
+            _showSnack('방을 찾을 수 없어요');
             setState(() => _joining = false);
           }
           return;
@@ -90,15 +135,12 @@ class _OpenRoomPreviewScreenState
           continue;
         }
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('입장에 실패했어요')),
-          );
+          _showSnack('입장에 실패했어요');
           setState(() => _joining = false);
         }
         return;
       }
 
-      // 비번 없는 방 또는 비번 통과
       if (!needsPw) {
         final result = await joinRoomWithPassword(
           roomId: widget.room.id,
@@ -107,9 +149,7 @@ class _OpenRoomPreviewScreenState
         );
         if (result != JoinResult.ok) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('입장에 실패했어요')),
-            );
+            _showSnack('입장에 실패했어요');
             setState(() => _joining = false);
           }
           return;
@@ -122,14 +162,11 @@ class _OpenRoomPreviewScreenState
 
       if (mounted) {
         Navigator.pop(context);
-        context.push('/main/group/${widget.room.id}', extra: widget.room);
+        context.push('/main/group/${widget.room.id}',
+            extra: widget.room);
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('입장 실패: $e')),
-        );
-      }
+      if (mounted) _showSnack('입장 실패: $e');
     } finally {
       if (mounted) setState(() => _joining = false);
     }
@@ -145,14 +182,24 @@ class _OpenRoomPreviewScreenState
       ref.invalidate(roomDetailProvider(widget.room.id));
       ref.invalidate(openRoomsProvider);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('실패: $e')),
-        );
-      }
+      if (mounted) _showSnack('실패: $e');
     } finally {
       if (mounted) setState(() => _liking = false);
     }
+  }
+
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: AppTheme.bgCard,
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 80),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12)),
+      ),
+    );
   }
 
   String _formatDate(String dateStr) {
@@ -164,7 +211,8 @@ class _OpenRoomPreviewScreenState
   Widget build(BuildContext context) {
     final roomAsync = ref.watch(roomDetailProvider(widget.room.id));
     final isLikedAsync = ref.watch(isLikedProvider(widget.room.id));
-    final isMemberAsync = ref.watch(isRoomMemberProvider(widget.room.id));
+    final isMemberAsync =
+        ref.watch(isRoomMemberProvider(widget.room.id));
     final isMember = isMemberAsync.value ?? false;
 
     return Scaffold(
@@ -173,16 +221,12 @@ class _OpenRoomPreviewScreenState
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        leading: Container(
-          margin: const EdgeInsets.only(left: 8),
-          decoration: BoxDecoration(
-            color: Colors.black.withOpacity(0.3),
-            shape: BoxShape.circle,
-          ),
-          child: IconButton(
-            icon: const Icon(Icons.arrow_back_ios_new,
-                color: Colors.white, size: 18),
-            onPressed: () => Navigator.pop(context),
+        scrolledUnderElevation: 0,
+        leadingWidth: 56,
+        leading: Center(
+          child: _GlassIconButton(
+            icon: Icons.arrow_back_ios_new_rounded,
+            onTap: () => Navigator.pop(context),
           ),
         ),
       ),
@@ -208,159 +252,26 @@ class _OpenRoomPreviewScreenState
             children: [
               Expanded(
                 child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
                   child: Column(
                     children: [
-                      Stack(
-                        children: [
-                          Container(
-                            width: double.infinity,
-                            height: 320,
-                            decoration: BoxDecoration(
-                              color: AppTheme.bgCard,
-                              image: room.avatarUrl != null
-                                  ? DecorationImage(
-                                      image: NetworkImage(room.avatarUrl!),
-                                      fit: BoxFit.cover,
-                                    )
-                                  : null,
-                            ),
-                            child: room.avatarUrl == null
-                                ? Center(
-                                    child: AvatarWidget(
-                                        url: null,
-                                        name: room.name,
-                                        size: 120),
-                                  )
-                                : null,
-                          ),
-                          Container(
-                            width: double.infinity,
-                            height: 320,
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                                colors: [
-                                  Colors.black.withOpacity(0.3),
-                                  Colors.transparent,
-                                  Colors.black.withOpacity(0.5),
-                                ],
-                                stops: const [0, 0.5, 1],
-                              ),
-                            ),
-                          ),
-                          Positioned(
-                            top: 80, left: 20,
-                            child: Wrap(
-                              spacing: 6,
-                              runSpacing: 6,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 5),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF06B6D4),
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(Icons.public,
-                                          color: Colors.white, size: 12),
-                                      const SizedBox(width: 4),
-                                      Text(room.category,
-                                          style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w700)),
-                                    ],
-                                  ),
-                                ),
-                                // ⭐ 비번 보호 배지
-                                if (room.hasPassword)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 10, vertical: 5),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFFBBF24),
-                                      borderRadius:
-                                          BorderRadius.circular(8),
-                                    ),
-                                    child: const Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(Icons.lock,
-                                            color: Colors.white,
-                                            size: 12),
-                                        SizedBox(width: 4),
-                                        Text('비밀번호',
-                                            style: TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 11,
-                                                fontWeight:
-                                                    FontWeight.w700)),
-                                      ],
-                                    ),
-                                  ),
-                                if (isMember)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 10, vertical: 5),
-                                    decoration: BoxDecoration(
-                                      color: AppTheme.primary,
-                                      borderRadius:
-                                          BorderRadius.circular(8),
-                                    ),
-                                    child: const Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(Icons.check_circle,
-                                            color: Colors.white,
-                                            size: 12),
-                                        SizedBox(width: 4),
-                                        Text('참여 중',
-                                            style: TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 11,
-                                                fontWeight:
-                                                    FontWeight.w700)),
-                                      ],
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                          Positioned(
-                            bottom: 20, left: 20, right: 20,
-                            child: Text(
-                              room.name,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 22,
-                                fontWeight: FontWeight.w800,
-                                shadows: [
-                                  Shadow(
-                                    color: Colors.black45,
-                                    blurRadius: 4,
-                                    offset: Offset(0, 1),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
+                      _HeaderArea(
+                        room: room,
+                        isMember: isMember,
                       ),
 
                       Padding(
                         padding: const EdgeInsets.all(20),
                         child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                          crossAxisAlignment:
+                              CrossAxisAlignment.start,
                           children: [
+                            // ⭐ 통계 카드 (멤버 수는 AnimatedSwitcher로 부드럽게)
                             Row(
                               children: [
                                 Expanded(
                                   child: _StatCard(
-                                    icon: Icons.people_outline,
+                                    icon: Icons.people_alt_rounded,
                                     label: '참여자',
                                     value: '${room.memberCount}명',
                                     color: AppTheme.primary,
@@ -369,7 +280,7 @@ class _OpenRoomPreviewScreenState
                                 const SizedBox(width: 10),
                                 Expanded(
                                   child: _StatCard(
-                                    icon: Icons.favorite,
+                                    icon: Icons.favorite_rounded,
                                     label: '좋아요',
                                     value: '${room.likeCount}',
                                     color: const Color(0xFFEF4444),
@@ -379,180 +290,125 @@ class _OpenRoomPreviewScreenState
                             ),
                             const SizedBox(height: 24),
 
-                            // ⭐ 비번 보호 안내 (멤버 아닐 때)
                             if (!isMember && room.hasPassword) ...[
-                              Container(
-                                padding: const EdgeInsets.all(14),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFFBBF24)
-                                      .withOpacity(0.10),
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(
-                                    color: const Color(0xFFFBBF24)
-                                        .withOpacity(0.4),
-                                  ),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Container(
-                                      width: 36, height: 36,
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFFBBF24)
-                                            .withOpacity(0.2),
-                                        borderRadius:
-                                            BorderRadius.circular(10),
-                                      ),
-                                      child: const Icon(Icons.lock,
-                                          color: Color(0xFFFBBF24),
-                                          size: 18),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text('비밀번호 보호 채팅방',
-                                              style: TextStyle(
-                                                  fontSize: 13,
-                                                  fontWeight:
-                                                      FontWeight.w800,
-                                                  color: AppTheme.textMain)),
-                                          const SizedBox(height: 2),
-                                          Text(
-                                              '입장 시 방장이 설정한 비밀번호가 필요해요',
-                                              style: TextStyle(
-                                                  fontSize: 11,
-                                                  color: AppTheme.textSub)),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                              _InfoCard(
+                                icon: Icons.lock_rounded,
+                                iconColor: const Color(0xFFFBBF24),
+                                title: '비밀번호 보호 채팅방',
+                                description:
+                                    '입장 시 방장이 설정한 비밀번호가 필요해요',
                               ),
-                              const SizedBox(height: 14),
+                              const SizedBox(height: 12),
                             ],
 
-                            // 프로필 선택 안내 (멤버 아닐 때)
                             if (!isMember) ...[
-                              Container(
-                                padding: const EdgeInsets.all(14),
-                                decoration: BoxDecoration(
-                                  color: AppTheme.primary.withOpacity(0.08),
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(
-                                    color: AppTheme.primary.withOpacity(0.3),
-                                  ),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Container(
-                                      width: 36, height: 36,
-                                      decoration: BoxDecoration(
-                                        color: AppTheme.primary
-                                            .withOpacity(0.15),
-                                        borderRadius:
-                                            BorderRadius.circular(10),
-                                      ),
-                                      child: const Icon(Icons.masks,
-                                          color: AppTheme.primary,
-                                          size: 18),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text('프로필을 선택해서 입장해요',
-                                              style: TextStyle(
-                                                  fontSize: 13,
-                                                  fontWeight:
-                                                      FontWeight.w800,
-                                                  color: AppTheme.textMain)),
-                                          const SizedBox(height: 2),
-                                          Text(
-                                              '기본 프로필 또는 부캐 프로필 중 선택할 수 있어요',
-                                              style: TextStyle(
-                                                  fontSize: 11,
-                                                  color: AppTheme.textSub)),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                              _InfoCard(
+                                icon: Icons.masks_rounded,
+                                iconColor: AppTheme.primary,
+                                title: '프로필을 선택해서 입장해요',
+                                description:
+                                    '기본 프로필 또는 부캐 프로필 중 선택할 수 있어요',
                               ),
                               const SizedBox(height: 24),
                             ],
 
                             if (room.tags.isNotEmpty) ...[
-                              Text('태그',
-                                  style: TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w700,
-                                      color: AppTheme.textSub)),
+                              _SectionLabel(
+                                  icon: Icons.tag_rounded,
+                                  label: '태그'),
                               const SizedBox(height: 10),
                               Wrap(
-                                spacing: 6, runSpacing: 6,
+                                spacing: 6,
+                                runSpacing: 6,
                                 children: room.tags.map((tag) {
                                   return Container(
                                     padding: const EdgeInsets.symmetric(
-                                        horizontal: 10, vertical: 5),
+                                        horizontal: 10, vertical: 6),
                                     decoration: BoxDecoration(
-                                      color: AppTheme.primary
-                                          .withOpacity(0.12),
+                                      gradient: LinearGradient(
+                                        colors: [
+                                          AppTheme.primary
+                                              .withOpacity(0.18),
+                                          AppTheme.primary
+                                              .withOpacity(0.08),
+                                        ],
+                                      ),
                                       borderRadius:
                                           BorderRadius.circular(14),
+                                      border: Border.all(
+                                        color: AppTheme.primary
+                                            .withOpacity(0.25),
+                                        width: 0.8,
+                                      ),
                                     ),
                                     child: Text('#$tag',
                                         style: const TextStyle(
                                             fontSize: 12,
-                                            color: AppTheme.primaryLight,
-                                            fontWeight: FontWeight.w600)),
+                                            color:
+                                                AppTheme.primaryLight,
+                                            fontWeight:
+                                                FontWeight.w700,
+                                            letterSpacing: -0.2)),
                                   );
                                 }).toList(),
                               ),
                               const SizedBox(height: 24),
                             ],
 
-                            Text('소개',
-                                style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w700,
-                                    color: AppTheme.textSub)),
+                            _SectionLabel(
+                                icon: Icons.description_rounded,
+                                label: '소개'),
                             const SizedBox(height: 10),
                             Container(
                               width: double.infinity,
                               padding: const EdgeInsets.all(16),
                               decoration: BoxDecoration(
                                 color: AppTheme.bgCard,
-                                borderRadius: BorderRadius.circular(14),
-                                border: Border.all(color: AppTheme.border),
+                                borderRadius:
+                                    BorderRadius.circular(14),
+                                border: Border.all(
+                                    color: AppTheme.border),
                               ),
                               child: Text(
                                 room.description?.isNotEmpty == true
                                     ? room.description!
                                     : '아직 소개가 없어요',
                                 style: TextStyle(
-                                    fontSize: 14,
-                                    color: room.description?.isNotEmpty == true
-                                        ? AppTheme.textMain
-                                        : AppTheme.textMuted,
-                                    height: 1.6),
+                                  fontSize: 14,
+                                  color: room.description
+                                              ?.isNotEmpty ==
+                                          true
+                                      ? AppTheme.textMain
+                                      : AppTheme.textMuted,
+                                  height: 1.6,
+                                  letterSpacing: -0.2,
+                                ),
                               ),
                             ),
                             const SizedBox(height: 20),
 
                             Row(
                               children: [
-                                Icon(Icons.schedule_outlined,
-                                    size: 14, color: AppTheme.textMuted),
+                                Container(
+                                  padding: const EdgeInsets.all(4),
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.bgCard,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                      Icons.schedule_rounded,
+                                      size: 11,
+                                      color: AppTheme.textMuted),
+                                ),
                                 const SizedBox(width: 6),
                                 Text(
-                                    '${_formatDate(room.createdAt)}에 생성됨',
-                                    style: TextStyle(
-                                        fontSize: 12,
-                                        color: AppTheme.textMuted)),
+                                  '${_formatDate(room.createdAt)}에 생성됨',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: AppTheme.textMuted,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
                               ],
                             ),
                             const SizedBox(height: 16),
@@ -567,91 +423,40 @@ class _OpenRoomPreviewScreenState
               Container(
                 decoration: BoxDecoration(
                   color: AppTheme.bg,
-                  border: Border(top: BorderSide(color: AppTheme.border)),
+                  border: Border(
+                    top: BorderSide(
+                      color: AppTheme.border.withOpacity(0.5),
+                      width: 0.8,
+                    ),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.06),
+                      blurRadius: 8,
+                      offset: const Offset(0, -2),
+                    ),
+                  ],
                 ),
-                padding: EdgeInsets.fromLTRB(20, 12, 20,
-                    MediaQuery.of(context).padding.bottom + 12),
+                padding: EdgeInsets.fromLTRB(
+                  16,
+                  12,
+                  16,
+                  MediaQuery.of(context).padding.bottom + 12,
+                ),
                 child: Row(
                   children: [
-                    GestureDetector(
-                      onTap: _liking ? null : _toggleLike,
-                      child: Container(
-                        width: 56, height: 50,
-                        decoration: BoxDecoration(
-                          color: isLiked
-                              ? const Color(0xFFEF4444).withOpacity(0.15)
-                              : AppTheme.bgCard,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(
-                            color: isLiked
-                                ? const Color(0xFFEF4444)
-                                : AppTheme.border,
-                          ),
-                        ),
-                        child: _liking
-                            ? const Center(
-                                child: SizedBox(
-                                  width: 18, height: 18,
-                                  child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Color(0xFFEF4444)),
-                                ),
-                              )
-                            : Icon(
-                                isLiked
-                                    ? Icons.favorite
-                                    : Icons.favorite_border,
-                                color: isLiked
-                                    ? const Color(0xFFEF4444)
-                                    : AppTheme.textSub,
-                                size: 22,
-                              ),
-                      ),
+                    _LikeButton(
+                      isLiked: isLiked,
+                      liking: _liking,
+                      onTap: _toggleLike,
                     ),
                     const SizedBox(width: 10),
                     Expanded(
-                      child: ElevatedButton(
-                        onPressed: _joining
-                            ? null
-                            : (isMember ? _goToRoom : _joinRoom),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: isMember
-                              ? AppTheme.primary
-                              : const Color(0xFF06B6D4),
-                          foregroundColor: Colors.white,
-                          minimumSize: const Size(double.infinity, 50),
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14)),
-                        ),
-                        child: _joining
-                            ? const SizedBox(
-                                width: 20, height: 20,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: Colors.white))
-                            : Row(
-                                mainAxisAlignment:
-                                    MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                      isMember
-                                          ? Icons.chat_bubble_rounded
-                                          : (room.hasPassword
-                                              ? Icons.lock_open
-                                              : Icons.masks),
-                                      color: Colors.white,
-                                      size: 20),
-                                  const SizedBox(width: 8),
-                                  Text(
-                                      isMember
-                                          ? '채팅방 가기'
-                                          : (room.hasPassword
-                                              ? '비밀번호 입력 후 입장'
-                                              : '프로필 선택 후 입장'),
-                                      style: const TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w700)),
-                                ],
-                              ),
+                      child: _JoinButton(
+                        isMember: isMember,
+                        hasPassword: room.hasPassword,
+                        joining: _joining,
+                        onTap: isMember ? _goToRoom : _joinRoom,
                       ),
                     ),
                   ],
@@ -665,6 +470,249 @@ class _OpenRoomPreviewScreenState
   }
 }
 
+// ═══════════════════════════════════════════════════
+// 헤더 영역
+// ═══════════════════════════════════════════════════
+class _HeaderArea extends StatelessWidget {
+  final GroupRoomModel room;
+  final bool isMember;
+
+  const _HeaderArea({required this.room, required this.isMember});
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        Container(
+          width: double.infinity,
+          height: 340,
+          decoration: BoxDecoration(
+            color: AppTheme.bgCard,
+            image: room.avatarUrl != null
+                ? DecorationImage(
+                    image: NetworkImage(room.avatarUrl!),
+                    fit: BoxFit.cover,
+                  )
+                : null,
+          ),
+          child: room.avatarUrl == null
+              ? Center(
+                  child: AvatarWidget(
+                      url: null, name: room.name, size: 120),
+                )
+              : null,
+        ),
+        Container(
+          width: double.infinity,
+          height: 340,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                Colors.black.withOpacity(0.5),
+                Colors.transparent,
+                AppTheme.bg.withOpacity(0.3),
+                AppTheme.bg,
+              ],
+              stops: const [0.0, 0.35, 0.75, 1.0],
+            ),
+          ),
+        ),
+        Positioned(
+          top: MediaQuery.of(context).padding.top + 60,
+          left: 20,
+          right: 20,
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _CategoryBadge(category: room.category),
+              if (room.hasPassword) _PasswordBadge(),
+              if (isMember) _MemberBadge(),
+            ],
+          ),
+        ),
+        Positioned(
+          bottom: 24,
+          left: 20,
+          right: 20,
+          child: Text(
+            room.name,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 26,
+              fontWeight: FontWeight.w900,
+              letterSpacing: -0.5,
+              shadows: [
+                Shadow(
+                  color: Colors.black.withOpacity(0.7),
+                  blurRadius: 14,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _CategoryBadge extends StatelessWidget {
+  final String category;
+  const _CategoryBadge({required this.category});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding:
+          const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF06B6D4), Color(0xFF0891B2)],
+        ),
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF06B6D4).withOpacity(0.4),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.public_rounded,
+              color: Colors.white, size: 12),
+          const SizedBox(width: 4),
+          Text(category,
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.2)),
+        ],
+      ),
+    );
+  }
+}
+
+class _PasswordBadge extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding:
+          const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFFFBBF24), Color(0xFFF59E0B)],
+        ),
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFFBBF24).withOpacity(0.4),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.lock_rounded, color: Colors.white, size: 12),
+          SizedBox(width: 4),
+          Text('비밀번호',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.2)),
+        ],
+      ),
+    );
+  }
+}
+
+class _MemberBadge extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding:
+          const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            AppTheme.primary,
+            AppTheme.primary.withOpacity(0.85),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.primary.withOpacity(0.4),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.check_circle_rounded,
+              color: Colors.white, size: 12),
+          SizedBox(width: 4),
+          Text('참여 중',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -0.2)),
+        ],
+      ),
+    );
+  }
+}
+
+class _GlassIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _GlassIconButton({required this.icon, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipOval(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.35),
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: Colors.white.withOpacity(0.2),
+            ),
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onTap,
+              customBorder: const CircleBorder(),
+              child: Icon(icon, color: Colors.white, size: 16),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// ⭐ 통계 카드 (참여자 수는 AnimatedSwitcher로 부드러운 전환)
+// ═══════════════════════════════════════════════════
 class _StatCard extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -681,26 +729,335 @@ class _StatCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 16),
+      padding: const EdgeInsets.symmetric(vertical: 18),
       decoration: BoxDecoration(
-        color: AppTheme.bgCard,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            color.withOpacity(0.08),
+            color.withOpacity(0.02),
+          ],
+        ),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppTheme.border),
+        border: Border.all(
+          color: color.withOpacity(0.2),
+          width: 0.8,
+        ),
       ),
       child: Column(
         children: [
-          Icon(icon, color: color, size: 22),
-          const SizedBox(height: 6),
-          Text(value,
-              style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w800,
-                  color: AppTheme.textMain)),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: color, size: 18),
+          ),
+          const SizedBox(height: 8),
+          // ⭐ 값이 바뀌면 부드럽게 슬라이드 전환
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 400),
+            transitionBuilder: (child, anim) {
+              return FadeTransition(
+                opacity: anim,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 0.4),
+                    end: Offset.zero,
+                  ).animate(anim),
+                  child: child,
+                ),
+              );
+            },
+            child: Text(value,
+                key: ValueKey(value),
+                style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w900,
+                    color: AppTheme.textMain,
+                    letterSpacing: -0.3)),
+          ),
           const SizedBox(height: 2),
           Text(label,
               style: TextStyle(
-                  fontSize: 11, color: AppTheme.textSub)),
+                  fontSize: 11,
+                  color: AppTheme.textSub,
+                  fontWeight: FontWeight.w600)),
         ],
+      ),
+    );
+  }
+}
+
+class _InfoCard extends StatelessWidget {
+  final IconData icon;
+  final Color iconColor;
+  final String title;
+  final String description;
+
+  const _InfoCard({
+    required this.icon,
+    required this.iconColor,
+    required this.title,
+    required this.description,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            iconColor.withOpacity(0.12),
+            iconColor.withOpacity(0.04),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: iconColor.withOpacity(0.3),
+          width: 0.8,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  iconColor.withOpacity(0.25),
+                  iconColor.withOpacity(0.12),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(11),
+            ),
+            child: Icon(icon, color: iconColor, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.textMain,
+                      letterSpacing: -0.2),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  description,
+                  style: TextStyle(
+                      fontSize: 11.5,
+                      color: AppTheme.textSub,
+                      height: 1.3,
+                      letterSpacing: -0.1),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  final IconData icon;
+  final String label;
+
+  const _SectionLabel({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 13, color: AppTheme.textSub),
+        const SizedBox(width: 5),
+        Text(
+          label,
+          style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: AppTheme.textSub,
+              letterSpacing: 0.2),
+        ),
+      ],
+    );
+  }
+}
+
+class _LikeButton extends StatelessWidget {
+  final bool isLiked;
+  final bool liking;
+  final VoidCallback onTap;
+
+  const _LikeButton({
+    required this.isLiked,
+    required this.liking,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const redColor = Color(0xFFEF4444);
+    return SizedBox(
+      width: 56,
+      height: 52,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        decoration: BoxDecoration(
+          gradient: isLiked
+              ? LinearGradient(
+                  colors: [
+                    redColor.withOpacity(0.18),
+                    redColor.withOpacity(0.08),
+                  ],
+                )
+              : null,
+          color: isLiked ? null : AppTheme.bgCard,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isLiked
+                ? redColor.withOpacity(0.5)
+                : AppTheme.border,
+            width: 1,
+          ),
+          boxShadow: isLiked
+              ? [
+                  BoxShadow(
+                    color: redColor.withOpacity(0.25),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ]
+              : null,
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: liking ? null : onTap,
+              child: Center(
+                child: liking
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: redColor,
+                        ),
+                      )
+                    : Icon(
+                        isLiked
+                            ? Icons.favorite_rounded
+                            : Icons.favorite_border_rounded,
+                        color: isLiked ? redColor : AppTheme.textSub,
+                        size: 22,
+                      ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _JoinButton extends StatelessWidget {
+  final bool isMember;
+  final bool hasPassword;
+  final bool joining;
+  final VoidCallback onTap;
+
+  const _JoinButton({
+    required this.isMember,
+    required this.hasPassword,
+    required this.joining,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = isMember
+        ? [AppTheme.primary, AppTheme.primary.withOpacity(0.85)]
+        : const [Color(0xFF06B6D4), Color(0xFF0891B2)];
+    final shadowColor =
+        isMember ? AppTheme.primary : const Color(0xFF06B6D4);
+
+    return Container(
+      height: 52,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: colors,
+        ),
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: shadowColor.withOpacity(0.4),
+            blurRadius: 14,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(14),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: joining ? null : onTap,
+            child: Center(
+              child: joining
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: Colors.white),
+                    )
+                  : Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          isMember
+                              ? Icons.chat_bubble_rounded
+                              : (hasPassword
+                                  ? Icons.lock_open_rounded
+                                  : Icons.masks_rounded),
+                          color: Colors.white,
+                          size: 19,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          isMember
+                              ? '채팅방 가기'
+                              : (hasPassword
+                                  ? '비밀번호 입력 후 입장'
+                                  : '프로필 선택 후 입장'),
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.white,
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                      ],
+                    ),
+            ),
+          ),
+        ),
       ),
     );
   }

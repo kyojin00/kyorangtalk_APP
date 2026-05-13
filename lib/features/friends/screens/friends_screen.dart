@@ -25,12 +25,8 @@ export '../providers/friends_provider.dart';
 // 친구 메인 스크린 — 리디자인
 //
 // 변경:
-// - 헤더: SliverAppBar 스타일, 큰 타이틀
-// - 내 프로필: 그라데이션 + 액션 버튼
-// - 검색바: 더 부드러운 음영 + 포커스 효과
-// - 친구 목록: 카운트 강조 + 그루핑
-// - 빈 상태: 일러스트 + CTA 강화
-// - 사이드 패널: 헤더에 프로필 미니카드
+// - AddFriendSheet, SuggestionsSection에 onMessage 콜백 연결
+// - DM 시작 로직을 _startChatWithUser로 일반화
 // ═══════════════════════════════════════════════
 
 class FriendsScreen extends ConsumerStatefulWidget {
@@ -103,16 +99,21 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
   }
 
   // ═════════════════════════════════════════════
-  // 채팅 시작
+  // ⭐ 채팅 시작 (공통 로직)
+  // - 친구 / 검색된 유저 / 알 수도 있는 친구 모두 사용
   // ═════════════════════════════════════════════
-  Future<void> _startChat(FriendModel friend) async {
+  Future<void> _startChatWithUser({
+    required String userId,
+    required String nickname,
+    String? avatarUrl,
+  }) async {
     final supabase = Supabase.instance.client;
 
     final existing = await supabase
         .from('kyorangtalk_rooms')
         .select('*')
-        .or('and(user1_id.eq.$_myId,user2_id.eq.${friend.friendId}),'
-            'and(user1_id.eq.${friend.friendId},user2_id.eq.$_myId)')
+        .or('and(user1_id.eq.$_myId,user2_id.eq.$userId),'
+            'and(user1_id.eq.$userId,user2_id.eq.$_myId)')
         .maybeSingle();
 
     String roomId;
@@ -121,7 +122,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
     } else {
       final newRoom = await supabase
           .from('kyorangtalk_rooms')
-          .insert({'user1_id': _myId, 'user2_id': friend.friendId})
+          .insert({'user1_id': _myId, 'user2_id': userId})
           .select()
           .single();
       roomId = newRoom['id'] as String;
@@ -130,18 +131,50 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
     if (!mounted) return;
 
     final room = ChatRoomModel(
-      partnerId:       friend.friendId,
-      partnerUsername: friend.nickname,
-      partnerName:     friend.nickname,
-      partnerAvatar:   friend.avatarUrl,
-      lastMessage:     '',
-      lastTime:        DateTime.now(),
-      unreadCount:     0,
-      isSent:          false,
-      roomId:          roomId,
+      partnerId: userId,
+      partnerUsername: nickname,
+      partnerName: nickname,
+      partnerAvatar: avatarUrl,
+      lastMessage: '',
+      lastTime: DateTime.now(),
+      unreadCount: 0,
+      isSent: false,
+      roomId: roomId,
     );
 
     context.push('/main/chat/${room.roomId}', extra: room);
+  }
+
+  // 친구 모델로부터 채팅 시작
+  Future<void> _startChat(FriendModel friend) async {
+    await _startChatWithUser(
+      userId: friend.friendId,
+      nickname: friend.nickname,
+      avatarUrl: friend.avatarUrl,
+    );
+  }
+
+  // ⭐ 검색된 유저 (Map)로부터 채팅 시작
+  Future<void> _startChatFromUserMap(
+      Map<String, dynamic> user) async {
+    final userId = user['id'] as String?;
+    final nickname = user['nickname'] as String? ?? '알 수 없음';
+    final avatarUrl = user['avatar_url'] as String?;
+    if (userId == null) return;
+    await _startChatWithUser(
+      userId: userId,
+      nickname: nickname,
+      avatarUrl: avatarUrl,
+    );
+  }
+
+  // ⭐ 알 수도 있는 친구로부터 채팅 시작
+  Future<void> _startChatFromSuggested(SuggestedFriend s) async {
+    await _startChatWithUser(
+      userId: s.userId,
+      nickname: s.nickname,
+      avatarUrl: s.avatarUrl,
+    );
   }
 
   // ═════════════════════════════════════════════
@@ -152,8 +185,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
       context,
       MaterialPageRoute(
         builder: (_) => UserProfileScreen(
-          userId:    friend.friendId,
-          nickname:  friend.nickname,
+          userId: friend.friendId,
+          nickname: friend.nickname,
           avatarUrl: friend.avatarUrl,
         ),
       ),
@@ -165,8 +198,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
       context,
       MaterialPageRoute(
         builder: (_) => UserProfileScreen(
-          userId:    s.userId,
-          nickname:  s.nickname,
+          userId: s.userId,
+          nickname: s.nickname,
           avatarUrl: s.avatarUrl,
         ),
       ),
@@ -189,15 +222,24 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
   // ═════════════════════════════════════════════
   Future<void> _sendSuggestionRequest(SuggestedFriend s) async {
     try {
-      await Supabase.instance.client
-          .from('kyorangtalk_friends')
-          .insert({
-        'requester_id': _myId,
-        'receiver_id':  s.userId,
-        'status':       'pending',
-      });
+      await Supabase.instance.client.rpc(
+        'send_friend_request',
+        params: {'target_user_id': s.userId},
+      );
       _invalidateAll();
       if (mounted) _showSnack('${s.nickname}님에게 친구 요청을 보냈어요');
+    } on PostgrestException catch (e) {
+      if (mounted) {
+        if (e.message.contains('already_friends')) {
+          _showSnack('이미 친구예요');
+        } else if (e.message.contains('already_pending')) {
+          _showSnack('이미 요청 중이에요');
+        } else if (e.message.contains('blocked')) {
+          _showSnack('차단된 유저예요');
+        } else {
+          _showSnack('요청 실패: ${e.message}');
+        }
+      }
     } catch (e) {
       if (mounted) _showSnack('요청 실패: $e');
     }
@@ -304,8 +346,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
           child: SafeArea(
             top: false,
             child: Padding(
-              padding: EdgeInsets.fromLTRB(
-                  20, 12, 20, MediaQuery.of(ctx).viewInsets.bottom + 20),
+              padding: EdgeInsets.fromLTRB(20, 12, 20,
+                  MediaQuery.of(ctx).viewInsets.bottom + 20),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -339,7 +381,6 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                     ),
                   ),
                   const SizedBox(height: 4),
-
                   ...const [
                     ['spam', '스팸/광고'],
                     ['harassment', '괴롭힘/욕설'],
@@ -362,7 +403,6 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                           ),
                         ),
                       )),
-
                   const SizedBox(height: 12),
                   Text(
                     '자세한 내용 (선택)',
@@ -401,7 +441,6 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                       contentPadding: const EdgeInsets.all(12),
                     ),
                   ),
-
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -409,8 +448,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                         child: OutlinedButton(
                           onPressed: () => Navigator.pop(ctx),
                           style: OutlinedButton.styleFrom(
-                            padding:
-                                const EdgeInsets.symmetric(vertical: 12),
+                            padding: const EdgeInsets.symmetric(
+                                vertical: 12),
                             side: BorderSide(color: AppTheme.border),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(12),
@@ -434,7 +473,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                 description: descriptionController
                                         .text.trim().isEmpty
                                     ? null
-                                    : descriptionController.text.trim(),
+                                    : descriptionController.text
+                                        .trim(),
                               );
                               if (mounted) _showSnack('신고가 접수됐어요');
                             } catch (e) {
@@ -444,8 +484,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFFEF4444),
                             foregroundColor: Colors.white,
-                            padding:
-                                const EdgeInsets.symmetric(vertical: 12),
+                            padding: const EdgeInsets.symmetric(
+                                vertical: 12),
                             elevation: 0,
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(12),
@@ -453,7 +493,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                           ),
                           child: const Text(
                             '신고하기',
-                            style: TextStyle(fontWeight: FontWeight.w700),
+                            style: TextStyle(
+                                fontWeight: FontWeight.w700),
                           ),
                         ),
                       ),
@@ -535,11 +576,14 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
       backgroundColor: AppTheme.bgCard,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (_) => AddFriendSheet(
         myId: _myId,
         onSent: _invalidateAll,
+        // ⭐ 메시지 콜백 연결
+        onMessage: _startChatFromUserMap,
       ),
     );
   }
@@ -551,7 +595,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
       backgroundColor: AppTheme.bgCard,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (_) => RequestsSheet(
         onAccept: _acceptRequest,
@@ -567,7 +612,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
       backgroundColor: AppTheme.bgCard,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (ctx) => FriendManageSheet(
         myId: _myId,
@@ -592,7 +638,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
             borderRadius: BorderRadius.circular(16)),
         title: Text('차단하기',
             style: TextStyle(
-                color: AppTheme.textMain, fontWeight: FontWeight.w700)),
+                color: AppTheme.textMain,
+                fontWeight: FontWeight.w700)),
         content: Text(
           '$nickname님을 차단하면 서로 메시지를 주고받을 수 없어요.\n친구 관계도 해제돼요.',
           style: TextStyle(color: AppTheme.textSub, fontSize: 14),
@@ -600,7 +647,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: Text('취소', style: TextStyle(color: AppTheme.textSub)),
+            child: Text('취소',
+                style: TextStyle(color: AppTheme.textSub)),
           ),
           TextButton(
             onPressed: () {
@@ -622,11 +670,11 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
   // ═════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
-    final friendsAsync     = ref.watch(friendsProvider);
-    final pendingAsync     = ref.watch(pendingRequestsProvider);
-    final myProfileAsync   = ref.watch(myProfileProvider);
+    final friendsAsync = ref.watch(friendsProvider);
+    final pendingAsync = ref.watch(pendingRequestsProvider);
+    final myProfileAsync = ref.watch(myProfileProvider);
     final suggestionsAsync = ref.watch(friendSuggestionsProvider);
-    final pendingCount     = pendingAsync.value?.length ?? 0;
+    final pendingCount = pendingAsync.value?.length ?? 0;
 
     final suggestions = (suggestionsAsync.value ?? [])
         .where((s) => !_dismissedSuggestions.contains(s.userId))
@@ -639,9 +687,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
           body: SafeArea(
             child: Column(
               children: [
-                // ─────────────────────────────────────────
-                // ✨ 헤더 — 큰 타이틀 + 우측 아이콘
-                // ─────────────────────────────────────────
+                // ─── 헤더 ───
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 18, 12, 12),
                   child: Row(
@@ -676,13 +722,11 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                         orElse: () => const SizedBox.shrink(),
                       ),
                       const Spacer(),
-                      // 친구 추가 빠른 버튼
                       _CircleIconButton(
                         icon: Icons.person_add_outlined,
                         onTap: _showAddFriendDialog,
                       ),
                       const SizedBox(width: 8),
-                      // 친구 요청 (배지 포함)
                       Stack(
                         clipBehavior: Clip.none,
                         children: [
@@ -701,13 +745,16 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                     minWidth: 16, minHeight: 16),
                                 decoration: BoxDecoration(
                                   color: const Color(0xFFEF4444),
-                                  borderRadius: BorderRadius.circular(10),
+                                  borderRadius:
+                                      BorderRadius.circular(10),
                                   border: Border.all(
                                       color: AppTheme.bg, width: 2),
                                 ),
                                 child: Center(
                                   child: Text(
-                                    pendingCount > 9 ? '9+' : '$pendingCount',
+                                    pendingCount > 9
+                                        ? '9+'
+                                        : '$pendingCount',
                                     style: const TextStyle(
                                       color: Colors.white,
                                       fontSize: 9,
@@ -728,20 +775,19 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                   ),
                 ),
 
-                // ─────────────────────────────────────────
-                // ✨ 내 프로필 카드 — 그라데이션 강조
-                // ─────────────────────────────────────────
+                // ─── 내 프로필 카드 ───
                 myProfileAsync.when(
                   loading: () => const SizedBox(height: 92),
                   error: (_, __) => const SizedBox(),
                   data: (prof) {
-                    final nickname = prof?['nickname'] as String? ?? '';
+                    final nickname =
+                        prof?['nickname'] as String? ?? '';
                     final avatar = prof?['avatar_url'] as String?;
                     final statusMessage =
                         prof?['status_message'] as String?;
                     return Padding(
-                      padding:
-                          const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                      padding: const EdgeInsets.fromLTRB(
+                          16, 4, 16, 12),
                       child: Material(
                         color: Colors.transparent,
                         child: InkWell(
@@ -761,7 +807,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                               ),
                               borderRadius: BorderRadius.circular(18),
                               border: Border.all(
-                                color: AppTheme.primary.withOpacity(0.18),
+                                color:
+                                    AppTheme.primary.withOpacity(0.18),
                               ),
                             ),
                             child: Row(
@@ -806,11 +853,11 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                                 fontSize: 16,
                                                 fontWeight:
                                                     FontWeight.w800,
-                                                color:
-                                                    AppTheme.textMain,
+                                                color: AppTheme
+                                                    .textMain,
                                               ),
-                                              overflow:
-                                                  TextOverflow.ellipsis,
+                                              overflow: TextOverflow
+                                                  .ellipsis,
                                             ),
                                           ),
                                           const SizedBox(width: 6),
@@ -823,8 +870,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                               color: AppTheme.primary
                                                   .withOpacity(0.15),
                                               borderRadius:
-                                                  BorderRadius.circular(
-                                                      6),
+                                                  BorderRadius
+                                                      .circular(6),
                                             ),
                                             child: Text(
                                               '나',
@@ -832,8 +879,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                                 fontSize: 10,
                                                 fontWeight:
                                                     FontWeight.w800,
-                                                color:
-                                                    AppTheme.primary,
+                                                color: AppTheme
+                                                    .primary,
                                               ),
                                             ),
                                           ),
@@ -841,19 +888,21 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                       ),
                                       const SizedBox(height: 4),
                                       Text(
-                                        statusMessage?.isNotEmpty == true
+                                        statusMessage?.isNotEmpty ==
+                                                true
                                             ? statusMessage!
                                             : '상태 메시지를 입력해보세요',
                                         style: TextStyle(
                                           fontSize: 12,
-                                          color:
-                                              statusMessage?.isNotEmpty ==
-                                                      true
-                                                  ? AppTheme.textSub
-                                                  : AppTheme.textMuted,
+                                          color: statusMessage
+                                                      ?.isNotEmpty ==
+                                                  true
+                                              ? AppTheme.textSub
+                                              : AppTheme.textMuted,
                                         ),
                                         maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
+                                        overflow:
+                                            TextOverflow.ellipsis,
                                       ),
                                     ],
                                   ),
@@ -879,9 +928,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                   },
                 ),
 
-                // ─────────────────────────────────────────
-                // ✨ 검색바 — 포커스 효과 + 더 부드러운 모양
-                // ─────────────────────────────────────────
+                // ─── 검색바 ───
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                   child: AnimatedContainer(
@@ -919,7 +966,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                         suffixIcon: _search.isNotEmpty
                             ? IconButton(
                                 icon: Icon(Icons.cancel,
-                                    color: AppTheme.textSub, size: 18),
+                                    color: AppTheme.textSub,
+                                    size: 18),
                                 onPressed: () {
                                   _searchController.clear();
                                   setState(() => _search = '');
@@ -932,9 +980,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                   ),
                 ),
 
-                // ─────────────────────────────────────────
-                // 친구 목록
-                // ─────────────────────────────────────────
+                // ─── 친구 목록 ───
                 Expanded(
                   child: friendsAsync.when(
                     loading: () => const Center(
@@ -943,7 +989,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                     ),
                     error: (e, _) => Center(
                       child: Text('오류: $e',
-                          style: TextStyle(color: AppTheme.textSub)),
+                          style:
+                              TextStyle(color: AppTheme.textSub)),
                     ),
                     data: (friends) {
                       final filtered = _search.isEmpty
@@ -954,11 +1001,12 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                   .contains(_search.toLowerCase()))
                               .toList();
 
-                      // 즐겨찾기 / 일반 분리
-                      final favorites =
-                          filtered.where((f) => f.isFavorite).toList();
-                      final others =
-                          filtered.where((f) => !f.isFavorite).toList();
+                      final favorites = filtered
+                          .where((f) => f.isFavorite)
+                          .toList();
+                      final others = filtered
+                          .where((f) => !f.isFavorite)
+                          .toList();
 
                       return CustomScrollView(
                         physics: const BouncingScrollPhysics(),
@@ -972,10 +1020,11 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                 onTap: _openSuggestedProfile,
                                 onAdd: _sendSuggestionRequest,
                                 onDismiss: _dismissSuggestion,
+                                // ⭐ 메시지 콜백 연결
+                                onMessage: _startChatFromSuggested,
                               ),
                             ),
 
-                          // 즐겨찾기 섹션
                           if (favorites.isNotEmpty) ...[
                             SliverToBoxAdapter(
                               child: _SectionHeader(
@@ -1009,8 +1058,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                             ),
                           ],
 
-                          // 친구 목록 헤더
-                          if (others.isNotEmpty || filtered.isEmpty)
+                          if (others.isNotEmpty ||
+                              filtered.isEmpty)
                             SliverToBoxAdapter(
                               child: _SectionHeader(
                                 icon: Icons.people_rounded,
@@ -1022,14 +1071,12 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                               ),
                             ),
 
-                          // 친구 타일들 / 빈 상태
                           if (filtered.isEmpty)
                             SliverFillRemaining(
                               hasScrollBody: false,
                               child: Padding(
-                                padding:
-                                    const EdgeInsets.fromLTRB(
-                                        20, 24, 20, 60),
+                                padding: const EdgeInsets.fromLTRB(
+                                    20, 24, 20, 60),
                                 child: Center(
                                   child: Column(
                                     mainAxisAlignment:
@@ -1044,8 +1091,10 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                         ),
                                         child: Icon(
                                           _search.isNotEmpty
-                                              ? Icons.search_off_rounded
-                                              : Icons.people_outline_rounded,
+                                              ? Icons
+                                                  .search_off_rounded
+                                              : Icons
+                                                  .people_outline_rounded,
                                           color: AppTheme.textSub,
                                           size: 38,
                                         ),
@@ -1058,7 +1107,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                         style: TextStyle(
                                           color: AppTheme.textMain,
                                           fontSize: 15,
-                                          fontWeight: FontWeight.w700,
+                                          fontWeight:
+                                              FontWeight.w700,
                                         ),
                                       ),
                                       const SizedBox(height: 6),
@@ -1080,20 +1130,24 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                           icon: const Icon(
                                               Icons.person_add_rounded,
                                               size: 18),
-                                          label: const Text('친구 추가하기'),
-                                          style: ElevatedButton.styleFrom(
+                                          label:
+                                              const Text('친구 추가하기'),
+                                          style: ElevatedButton
+                                              .styleFrom(
                                             backgroundColor:
                                                 AppTheme.primary,
-                                            foregroundColor: Colors.white,
+                                            foregroundColor:
+                                                Colors.white,
                                             elevation: 0,
                                             padding: const EdgeInsets
                                                 .symmetric(
                                                 horizontal: 20,
                                                 vertical: 12),
-                                            shape: RoundedRectangleBorder(
+                                            shape:
+                                                RoundedRectangleBorder(
                                               borderRadius:
-                                                  BorderRadius.circular(
-                                                      12),
+                                                  BorderRadius
+                                                      .circular(12),
                                             ),
                                           ),
                                         ),
@@ -1127,7 +1181,6 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                               ),
                             ),
 
-                          // 하단 여백
                           const SliverToBoxAdapter(
                               child: SizedBox(height: 80)),
                         ],
@@ -1140,14 +1193,13 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
           ),
         ),
 
-        // ── 사이드 패널 dimmer ──
         if (_isPanelOpen)
           GestureDetector(
             onTap: _closePanel,
-            child: Container(color: Colors.black.withOpacity(0.5)),
+            child:
+                Container(color: Colors.black.withOpacity(0.5)),
           ),
 
-        // ── ✨ 사이드 패널 ──
         if (_isPanelOpen)
           Positioned(
             top: 0,
@@ -1163,10 +1215,9 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // 헤더
                       Padding(
-                        padding:
-                            const EdgeInsets.fromLTRB(20, 20, 12, 8),
+                        padding: const EdgeInsets.fromLTRB(
+                            20, 20, 12, 8),
                         child: Row(
                           children: [
                             Text(
@@ -1186,8 +1237,6 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                           ],
                         ),
                       ),
-
-                      // 미니 프로필 카드
                       myProfileAsync.maybeWhen(
                         data: (prof) {
                           if (prof == null) return const SizedBox();
@@ -1202,7 +1251,8 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                               padding: const EdgeInsets.all(14),
                               decoration: BoxDecoration(
                                 color: AppTheme.bgCard,
-                                borderRadius: BorderRadius.circular(14),
+                                borderRadius:
+                                    BorderRadius.circular(14),
                               ),
                               child: Row(
                                 children: [
@@ -1220,8 +1270,10 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                           nickname,
                                           style: TextStyle(
                                             fontSize: 14,
-                                            fontWeight: FontWeight.w800,
-                                            color: AppTheme.textMain,
+                                            fontWeight:
+                                                FontWeight.w800,
+                                            color:
+                                                AppTheme.textMain,
                                           ),
                                           overflow:
                                               TextOverflow.ellipsis,
@@ -1244,14 +1296,12 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                         },
                         orElse: () => const SizedBox(),
                       ),
-
                       Divider(
                           color: AppTheme.border,
                           height: 1,
                           indent: 16,
                           endIndent: 16),
                       const SizedBox(height: 8),
-
                       PanelMenuItem(
                         icon: Icons.person_add_outlined,
                         label: '친구 추가',
@@ -1291,7 +1341,7 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
 }
 
 // ═══════════════════════════════════════════════
-// ✨ 보조 위젯들
+// 보조 위젯들
 // ═══════════════════════════════════════════════
 
 class _CircleIconButton extends StatelessWidget {

@@ -7,8 +7,9 @@ import '../models/chat_room_model.dart';
 import '../models/message_model.dart';
 
 // ═══════════════════════════════════════════════════
-// 📱 일반 AppBar
+// 📱 ChatAppBar — 리디자인 (원형 버튼 정렬 수정)
 // ═══════════════════════════════════════════════════
+
 AppBar buildChatAppBar({
   required BuildContext context,
   required ChatRoomModel room,
@@ -34,96 +35,166 @@ AppBar buildChatAppBar({
       isBlockedByPartner == false &&
       friendStatus != 'accepted';
 
-  // ⭐ 통화 가능 조건: 차단 안 됐고 상태 로드 완료
   final canCall = isStatusLoaded &&
       isBlocked != true &&
       isBlockedByPartner != true;
 
   return AppBar(
     backgroundColor: AppTheme.bg,
-    leading: IconButton(
-      icon: const Icon(Icons.arrow_back_ios,
-          color: AppTheme.primaryLight, size: 20),
-      onPressed: () => Navigator.pop(context),
+    elevation: 0,
+    scrolledUnderElevation: 0,
+    leadingWidth: 56,
+    leading: Center(
+      child: _CircleIconButton(
+        icon: Icons.arrow_back_ios_new_rounded,
+        onTap: () => Navigator.pop(context),
+        iconColor: AppTheme.primaryLight,
+      ),
     ),
-    titleSpacing: 0,
-    title: GestureDetector(
-      onTap: onProfileTap,
-      child: Row(
-        children: [
-          AvatarWidget(
-              url: room.partnerAvatar, name: room.partnerName, size: 34),
-          const SizedBox(width: 10),
-          Flexible(
-            child: Text(
-              room.partnerName,
-              style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: AppTheme.textMain),
-              overflow: TextOverflow.ellipsis,
-            ),
+    titleSpacing: 4,
+    title: Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onProfileTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+              horizontal: 6, vertical: 6),
+          child: Row(
+            children: [
+              // 아바타 + 글로우 + 친구 상태 점
+              Stack(
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: friendStatus == 'accepted'
+                          ? [
+                              BoxShadow(
+                                color:
+                                    AppTheme.primary.withOpacity(0.3),
+                                blurRadius: 8,
+                                spreadRadius: 0,
+                              ),
+                            ]
+                          : null,
+                    ),
+                    child: AvatarWidget(
+                      url: room.partnerAvatar,
+                      name: room.partnerName,
+                      size: 36,
+                    ),
+                  ),
+                  if (isStatusLoaded &&
+                      isBlocked == false &&
+                      isBlockedByPartner == false &&
+                      friendStatus == 'accepted')
+                    Positioned(
+                      right: 0,
+                      bottom: 0,
+                      child: Container(
+                        width: 11,
+                        height: 11,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF22C55E),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: AppTheme.bg,
+                            width: 2,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(width: 11),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Flexible(
+                          child: Text(
+                            room.partnerName,
+                            style: TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w800,
+                              color: AppTheme.textMain,
+                              letterSpacing: -0.3,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (isMuted) ...[
+                          const SizedBox(width: 6),
+                          Icon(
+                            Icons.notifications_off_rounded,
+                            color: AppTheme.textSub,
+                            size: 14,
+                          ),
+                        ],
+                        if (isStatusLoaded && isBlocked == true) ...[
+                          const SizedBox(width: 6),
+                          const Icon(Icons.block_rounded,
+                              color: Color(0xFFEF4444), size: 14),
+                        ],
+                      ],
+                    ),
+                    if (showNotFriendBadge) ...[
+                      const SizedBox(height: 3),
+                      _NotFriendBadge(
+                        friendStatus: friendStatus ?? 'none',
+                        onTap: onNotFriendTap,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
           ),
-          if (showNotFriendBadge) ...[
-            const SizedBox(width: 6),
-            _NotFriendBadge(
-              friendStatus: friendStatus ?? 'none',
-              onTap: onNotFriendTap,
-            ),
-          ],
-          if (isMuted) ...[
-            const SizedBox(width: 6),
-            Icon(Icons.notifications_off,
-                color: AppTheme.textSub, size: 14),
-          ],
-          if (isStatusLoaded && isBlocked == true) ...[
-            const SizedBox(width: 6),
-            const Icon(Icons.block, color: Color(0xFFEF4444), size: 14),
-          ],
-        ],
+        ),
       ),
     ),
     actions: [
-      // ⭐ 통화 버튼 (차단 상태가 아닐 때만)
       if (canCall)
         CallButton(
           roomType: CallRoomType.dm,
           sourceRoomId: room.roomId,
         ),
-      IconButton(
-        icon: Icon(Icons.search, color: AppTheme.textSub),
-        onPressed: onSearchTap,
+      const SizedBox(width: 4),
+      _CircleIconButton(
+        icon: Icons.search_rounded,
+        onTap: onSearchTap,
+        iconColor: AppTheme.textMain,
       ),
-      PopupMenuButton<String>(
-        color: AppTheme.bgCard,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12)),
-        icon: Icon(Icons.more_vert, color: AppTheme.textSub),
-        onSelected: (value) {
-          switch (value) {
-            case 'leave':      onLeave();      break;
-            case 'profile':    onProfileTap(); break;
-            case 'mute':       onMute();       break;
-            case 'unblock':    onUnblock();    break;
-            case 'add_friend': onAddFriend();  break;
-            case 'block':      onBlock();      break;
-            case 'report':     onReport();     break;
-            case 'gallery':    onGallery();    break;
-            case 'memory':     onMemory();     break;
-          }
-        },
-        itemBuilder: (_) => _buildMenuItems(
-          isStatusLoaded: isStatusLoaded,
-          isBlocked: isBlocked,
-          isBlockedByPartner: isBlockedByPartner,
-          friendStatus: friendStatus,
-          isMuted: isMuted,
-        ),
+      const SizedBox(width: 4),
+      _MenuButton(
+        isStatusLoaded: isStatusLoaded,
+        isBlocked: isBlocked,
+        isBlockedByPartner: isBlockedByPartner,
+        friendStatus: friendStatus,
+        isMuted: isMuted,
+        onLeave: onLeave,
+        onProfile: onProfileTap,
+        onMute: onMute,
+        onUnblock: onUnblock,
+        onAddFriend: onAddFriend,
+        onBlock: onBlock,
+        onReport: onReport,
+        onGallery: onGallery,
+        onMemory: onMemory,
       ),
+      const SizedBox(width: 10),
     ],
     bottom: PreferredSize(
-      preferredSize: const Size.fromHeight(1),
-      child: Divider(height: 1, color: AppTheme.border),
+      preferredSize: const Size.fromHeight(0.5),
+      child: Container(
+        height: 0.5,
+        color: AppTheme.border.withOpacity(0.5),
+      ),
     ),
   );
 }
@@ -144,50 +215,234 @@ PreferredSizeWidget buildChatSearchAppBar({
 }) {
   return AppBar(
     backgroundColor: AppTheme.bg,
-    leading: IconButton(
-      icon: Icon(Icons.close, color: AppTheme.textSub, size: 20),
-      onPressed: onClose,
-    ),
-    title: TextField(
-      controller: searchController,
-      autofocus: true,
-      style: TextStyle(color: AppTheme.textMain, fontSize: 15),
-      decoration: InputDecoration(
-        hintText: '메시지 검색...',
-        border: InputBorder.none,
-        hintStyle: TextStyle(color: AppTheme.textSub),
+    elevation: 0,
+    scrolledUnderElevation: 0,
+    leadingWidth: 56,
+    leading: Center(
+      child: _CircleIconButton(
+        icon: Icons.close_rounded,
+        onTap: onClose,
+        iconColor: AppTheme.textMain,
       ),
-      onChanged: onSearch,
+    ),
+    titleSpacing: 4,
+    title: Container(
+      height: 40,
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Row(
+        children: [
+          const SizedBox(width: 14),
+          Icon(Icons.search_rounded,
+              size: 17, color: AppTheme.textSub),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: searchController,
+              autofocus: true,
+              style: TextStyle(
+                color: AppTheme.textMain,
+                fontSize: 15,
+                fontWeight: FontWeight.w500,
+                letterSpacing: -0.2,
+              ),
+              cursorColor: AppTheme.primary,
+              decoration: InputDecoration(
+                hintText: '메시지 검색',
+                hintStyle: TextStyle(
+                  color: AppTheme.textMuted,
+                  fontWeight: FontWeight.w400,
+                ),
+                filled: false,
+                fillColor: Colors.transparent,
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                isDense: true,
+                contentPadding:
+                    const EdgeInsets.symmetric(vertical: 10),
+              ),
+              onChanged: onSearch,
+            ),
+          ),
+        ],
+      ),
     ),
     actions: [
       if (searchResults.isNotEmpty)
         Center(
-          child: Padding(
-            padding: const EdgeInsets.only(right: 4),
+          child: Container(
+            margin: const EdgeInsets.only(right: 6),
+            padding:
+                const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+            decoration: BoxDecoration(
+              color: AppTheme.primary.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(8),
+            ),
             child: Text(
               '${searchResults.length - searchIndex}/${searchResults.length}',
-              style: TextStyle(color: AppTheme.textSub, fontSize: 13),
+              style: TextStyle(
+                color: AppTheme.primary,
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+              ),
             ),
           ),
         ),
-      IconButton(
-        icon: Icon(Icons.keyboard_arrow_up, color: AppTheme.textSub),
-        onPressed: searchResults.isEmpty ? null : onPrev,
+      _CircleIconButton(
+        icon: Icons.keyboard_arrow_up_rounded,
+        onTap: searchResults.isEmpty ? () {} : onPrev,
+        iconColor: searchResults.isEmpty
+            ? AppTheme.textMuted
+            : AppTheme.textMain,
       ),
-      IconButton(
-        icon: Icon(Icons.keyboard_arrow_down, color: AppTheme.textSub),
-        onPressed: searchResults.isEmpty ? null : onNext,
+      const SizedBox(width: 4),
+      _CircleIconButton(
+        icon: Icons.keyboard_arrow_down_rounded,
+        onTap: searchResults.isEmpty ? () {} : onNext,
+        iconColor: searchResults.isEmpty
+            ? AppTheme.textMuted
+            : AppTheme.textMain,
       ),
+      const SizedBox(width: 10),
     ],
     bottom: PreferredSize(
-      preferredSize: const Size.fromHeight(1),
-      child: Divider(height: 1, color: AppTheme.border),
+      preferredSize: const Size.fromHeight(0.5),
+      child: Container(
+        height: 0.5,
+        color: AppTheme.border.withOpacity(0.5),
+      ),
     ),
   );
 }
 
 // ═══════════════════════════════════════════════════
-// 📋 메뉴 아이템
+// 원형 아이콘 버튼 — Container가 보더/배경, ClipOval은 ripple만
+// ═══════════════════════════════════════════════════
+class _CircleIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final Color iconColor;
+
+  const _CircleIconButton({
+    required this.icon,
+    required this.onTap,
+    required this.iconColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        shape: BoxShape.circle,
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: ClipOval(
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onTap,
+            child: Center(
+              child: Icon(icon, color: iconColor, size: 18),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// 메뉴 버튼
+// ═══════════════════════════════════════════════════
+class _MenuButton extends StatelessWidget {
+  final bool isStatusLoaded;
+  final bool? isBlocked;
+  final bool? isBlockedByPartner;
+  final String? friendStatus;
+  final bool isMuted;
+  final VoidCallback onLeave;
+  final VoidCallback onProfile;
+  final VoidCallback onMute;
+  final VoidCallback onUnblock;
+  final VoidCallback onAddFriend;
+  final VoidCallback onBlock;
+  final VoidCallback onReport;
+  final VoidCallback onGallery;
+  final VoidCallback onMemory;
+
+  const _MenuButton({
+    required this.isStatusLoaded,
+    required this.isBlocked,
+    required this.isBlockedByPartner,
+    required this.friendStatus,
+    required this.isMuted,
+    required this.onLeave,
+    required this.onProfile,
+    required this.onMute,
+    required this.onUnblock,
+    required this.onAddFriend,
+    required this.onBlock,
+    required this.onReport,
+    required this.onGallery,
+    required this.onMemory,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      color: AppTheme.bgCard,
+      elevation: 8,
+      shadowColor: Colors.black.withOpacity(0.3),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: AppTheme.border),
+      ),
+      offset: const Offset(0, 44),
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: AppTheme.bgCard,
+          shape: BoxShape.circle,
+          border: Border.all(color: AppTheme.border),
+        ),
+        alignment: Alignment.center,
+        child: Icon(Icons.more_horiz_rounded,
+            color: AppTheme.textMain, size: 18),
+      ),
+      onSelected: (value) {
+        switch (value) {
+          case 'leave': onLeave(); break;
+          case 'profile': onProfile(); break;
+          case 'mute': onMute(); break;
+          case 'unblock': onUnblock(); break;
+          case 'add_friend': onAddFriend(); break;
+          case 'block': onBlock(); break;
+          case 'report': onReport(); break;
+          case 'gallery': onGallery(); break;
+          case 'memory': onMemory(); break;
+        }
+      },
+      itemBuilder: (_) => _buildMenuItems(
+        isStatusLoaded: isStatusLoaded,
+        isBlocked: isBlocked,
+        isBlockedByPartner: isBlockedByPartner,
+        friendStatus: friendStatus,
+        isMuted: isMuted,
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// 메뉴 아이템 빌더
 // ═══════════════════════════════════════════════════
 List<PopupMenuEntry<String>> _buildMenuItems({
   required bool isStatusLoaded,
@@ -198,24 +453,24 @@ List<PopupMenuEntry<String>> _buildMenuItems({
 }) {
   if (!isStatusLoaded) {
     return [
-      _menuItem('profile', Icons.person_outline, '프로필 보기',
+      _menuItem('profile', Icons.person_outline_rounded, '프로필 보기',
           AppTheme.textSub, AppTheme.textMain),
-      _menuItem('leave', Icons.exit_to_app, '채팅방 나가기',
-          const Color(0xFFEF4444), const Color(0xFFEF4444), bold: true),
+      _menuItem('leave', Icons.exit_to_app_rounded, '채팅방 나가기',
+          const Color(0xFFEF4444), const Color(0xFFEF4444),
+          bold: true),
     ];
   }
 
   return [
-    _menuItem('profile', Icons.person_outline, '프로필 보기',
+    _menuItem('profile', Icons.person_outline_rounded, '프로필 보기',
         AppTheme.textSub, AppTheme.textMain),
 
-    // ⭐ NEW: 갤러리/추억 (대화 관련 묶음)
-    const PopupMenuDivider(height: 1),
-    _menuItem('gallery', Icons.photo_library_outlined, '갤러리',
+    const PopupMenuDivider(height: 8),
+    _menuItem('gallery', Icons.photo_library_rounded, '갤러리',
         AppTheme.textSub, AppTheme.textMain),
-    _menuItem('memory', Icons.favorite_outline, '추억',
+    _menuItem('memory', Icons.favorite_rounded, '추억',
         AppTheme.textSub, AppTheme.textMain),
-    const PopupMenuDivider(height: 1),
+    const PopupMenuDivider(height: 8),
 
     if (friendStatus == 'none' &&
         isBlocked == false &&
@@ -226,22 +481,24 @@ List<PopupMenuEntry<String>> _buildMenuItems({
       _menuItem(
         'mute',
         isMuted
-            ? Icons.notifications_active_outlined
-            : Icons.notifications_off_outlined,
+            ? Icons.notifications_active_rounded
+            : Icons.notifications_off_rounded,
         isMuted ? '알림 켜기' : '알림 끄기',
         isMuted ? AppTheme.primary : AppTheme.textSub,
         isMuted ? AppTheme.primary : AppTheme.textMain,
         bold: isMuted,
       ),
     _menuItem('report', Icons.flag_outlined, '신고하기',
-        const Color(0xFFEF4444), const Color(0xFFEF4444), bold: true),
+        const Color(0xFFFBBF24), const Color(0xFFFBBF24), bold: true),
     if (isBlocked == true)
-      _menuItem('unblock', Icons.check_circle_outline, '차단 해제',
+      _menuItem('unblock', Icons.check_circle_outline_rounded, '차단 해제',
           AppTheme.primary, AppTheme.primary, bold: true),
     if (isBlocked == false)
-      _menuItem('block', Icons.block, '차단하기',
-          const Color(0xFFEF4444), const Color(0xFFEF4444), bold: true),
-    _menuItem('leave', Icons.exit_to_app, '채팅방 나가기',
+      _menuItem('block', Icons.block_rounded, '차단하기',
+          const Color(0xFFEF4444), const Color(0xFFEF4444),
+          bold: true),
+    const PopupMenuDivider(height: 8),
+    _menuItem('leave', Icons.exit_to_app_rounded, '채팅방 나가기',
         const Color(0xFFEF4444), const Color(0xFFEF4444), bold: true),
   ];
 }
@@ -256,16 +513,27 @@ PopupMenuItem<String> _menuItem(
 }) {
   return PopupMenuItem(
     value: value,
+    height: 44,
     child: Row(
       children: [
-        Icon(icon, color: iconColor, size: 18),
-        const SizedBox(width: 10),
+        Container(
+          width: 28,
+          height: 28,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: iconColor.withOpacity(0.12),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(icon, color: iconColor, size: 16),
+        ),
+        const SizedBox(width: 12),
         Text(
           label,
           style: TextStyle(
             color: textColor,
             fontSize: 14,
-            fontWeight: bold ? FontWeight.w600 : FontWeight.normal,
+            fontWeight: bold ? FontWeight.w700 : FontWeight.w500,
+            letterSpacing: -0.2,
           ),
         ),
       ],
@@ -274,7 +542,7 @@ PopupMenuItem<String> _menuItem(
 }
 
 // ═══════════════════════════════════════════════════
-// 🏷️ 친구 아님 뱃지
+// 친구 아님 뱃지
 // ═══════════════════════════════════════════════════
 class _NotFriendBadge extends StatelessWidget {
   final String friendStatus;
@@ -288,28 +556,42 @@ class _NotFriendBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isPending = friendStatus == 'pending';
+    final Color color =
+        isPending ? AppTheme.primary : const Color(0xFFFBBF24);
 
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: BoxDecoration(
-          color: isPending
-              ? AppTheme.primary.withOpacity(0.15)
-              : const Color(0xFFFBBF24).withOpacity(0.15),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: isPending
-                ? AppTheme.primary.withOpacity(0.3)
-                : const Color(0xFFFBBF24).withOpacity(0.3),
+          gradient: LinearGradient(
+            colors: [
+              color.withOpacity(0.22),
+              color.withOpacity(0.10),
+            ],
           ),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: color.withOpacity(0.35),
+            width: 0.8,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(0.15),
+              blurRadius: 6,
+              offset: const Offset(0, 2),
+            ),
+          ],
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              isPending ? Icons.schedule : Icons.person_outline,
-              color: isPending ? AppTheme.primary : const Color(0xFFFBBF24),
+              isPending
+                  ? Icons.schedule_rounded
+                  : Icons.person_outline_rounded,
+              color: color,
               size: 11,
             ),
             const SizedBox(width: 3),
@@ -317,9 +599,9 @@ class _NotFriendBadge extends StatelessWidget {
               isPending ? '요청 중' : '친구 아님',
               style: TextStyle(
                 fontSize: 10,
-                fontWeight: FontWeight.w700,
-                color:
-                    isPending ? AppTheme.primary : const Color(0xFFFBBF24),
+                fontWeight: FontWeight.w800,
+                color: color,
+                letterSpacing: -0.1,
               ),
             ),
           ],

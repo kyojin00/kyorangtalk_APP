@@ -7,10 +7,22 @@ import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 
 // ═══════════════════════════════════════════════
-// 프로필 선택 결과 모델
+// 🎭 ProfileSelectScreen — 리디자인
+//
+// 변경:
+// - 헤더: 원형 글래스 버튼 + 26pt 큰 타이틀
+// - 안내 카드: 그라데이션 + 큰 이모지
+// - 프로필 타일: 그라데이션 보더 (선택 시 글로우)
+// - 라디오 체크: primary 그라데이션 + 그림자
+// - 추가 버튼: 더 화려한 그라데이션 카드
+// - 입장 버튼: primary 그라데이션 + 그림자
+// - 새 프로필 시트: 글래스 + 그라데이션
+// ═══════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════
+// 모델 (유지)
 // ═══════════════════════════════════════════════
 class ProfileSelection {
-  /// null이면 기본 프로필, 값이 있으면 서브 프로필 ID
   final String? subProfileId;
   final String displayName;
   final String? avatarUrl;
@@ -24,9 +36,6 @@ class ProfileSelection {
   bool get isDefault => subProfileId == null;
 }
 
-// ═══════════════════════════════════════════════
-// 서브 프로필 모델
-// ═══════════════════════════════════════════════
 class SubProfileModel {
   final String id;
   final String userId;
@@ -58,12 +67,10 @@ class SubProfileModel {
     );
   }
 
-  String get displayName => nickname?.isNotEmpty == true ? nickname! : name;
+  String get displayName =>
+      nickname?.isNotEmpty == true ? nickname! : name;
 }
 
-// ═══════════════════════════════════════════════
-// 기본 프로필 모델
-// ═══════════════════════════════════════════════
 class MainProfileModel {
   final String id;
   final String nickname;
@@ -79,7 +86,7 @@ class MainProfileModel {
 }
 
 // ═══════════════════════════════════════════════
-// 내 기본 프로필 Provider
+// Providers (유지)
 // ═══════════════════════════════════════════════
 final myMainProfileProvider =
     FutureProvider<MainProfileModel?>((ref) async {
@@ -102,9 +109,6 @@ final myMainProfileProvider =
   );
 });
 
-// ═══════════════════════════════════════════════
-// 내 서브 프로필 목록 Provider
-// ═══════════════════════════════════════════════
 final mySubProfilesProvider =
     FutureProvider<List<SubProfileModel>>((ref) async {
   final user = Supabase.instance.client.auth.currentUser;
@@ -120,7 +124,7 @@ final mySubProfilesProvider =
 });
 
 // ═══════════════════════════════════════════════
-// 프로필 선택 화면
+// 메인 화면
 // ═══════════════════════════════════════════════
 class ProfileSelectScreen extends ConsumerStatefulWidget {
   final String roomName;
@@ -137,9 +141,8 @@ class ProfileSelectScreen extends ConsumerStatefulWidget {
 
 class _ProfileSelectScreenState
     extends ConsumerState<ProfileSelectScreen> {
-  // null = 기본 프로필 선택, String = 서브 프로필 ID
   String? _selectedSubProfileId;
-  bool _defaultSelected = true; // 초기값: 기본 프로필 선택됨
+  bool _defaultSelected = true;
 
   void _selectDefault() {
     setState(() {
@@ -162,7 +165,8 @@ class _ProfileSelectScreenState
       isScrollControlled: true,
       useSafeArea: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (_) => const _CreateProfileSheet(),
     ).then((created) {
@@ -205,273 +209,386 @@ class _ProfileSelectScreenState
 
     return Scaffold(
       backgroundColor: AppTheme.bg,
-      appBar: AppBar(
-        backgroundColor: AppTheme.bg,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios,
-              color: AppTheme.primaryLight, size: 20),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: Text(
-          '프로필 선택',
-          style: TextStyle(
-              color: AppTheme.textMain,
-              fontSize: 17,
-              fontWeight: FontWeight.w700),
-        ),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Divider(height: 1, color: AppTheme.border),
-        ),
-      ),
-      body: mainProfileAsync.when(
-        loading: () => const Center(
-            child: CircularProgressIndicator(color: AppTheme.primary)),
-        error: (e, _) => Center(
-            child: Text('오류: $e',
-                style: TextStyle(color: AppTheme.textSub))),
-        data: (mainProfile) {
-          return subProfilesAsync.when(
-            loading: () => const Center(
-                child: CircularProgressIndicator(
-                    color: AppTheme.primary)),
-            error: (e, _) => Center(
-                child: Text('오류: $e',
-                    style: TextStyle(color: AppTheme.textSub))),
-            data: (subProfiles) {
-              return Column(
+      body: SafeArea(
+        child: Column(
+          children: [
+            // ─── 헤더 ──────────────────────────────
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+              child: Row(
                 children: [
-                  // 안내 메시지
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: AppTheme.primary.withOpacity(0.08),
-                      border: Border(
-                          bottom: BorderSide(color: AppTheme.border)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('🎭',
-                            style: TextStyle(fontSize: 28)),
-                        const SizedBox(height: 8),
-                        Text(
-                          '어떤 프로필로 참여할까요?',
-                          style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w800,
-                              color: AppTheme.textMain),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '"${widget.roomName}" 채팅방에 프로필을 선택해주세요',
-                          style: TextStyle(
-                              fontSize: 13,
-                              color: AppTheme.textSub),
-                        ),
-                        const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: AppTheme.primary.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.info_outline,
-                                  color: AppTheme.primary,
-                                  size: 14),
-                              const SizedBox(width: 4),
-                              Text(
-                                '한 번 선택하면 변경할 수 없어요',
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: AppTheme.primaryLight,
-                                    fontWeight: FontWeight.w600),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
+                  _CircleIconButton(
+                    icon: Icons.arrow_back_ios_new_rounded,
+                    onTap: () => Navigator.pop(context),
+                    iconColor: AppTheme.primaryLight,
                   ),
-
-                  // 프로필 목록
-                  Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.all(16),
-                      children: [
-                        // ✨ 1. 기본 프로필 (항상 맨 위)
-                        if (mainProfile != null)
-                          _ProfileTile(
-                            name: mainProfile.nickname,
-                            subtitle: mainProfile.statusMessage
-                                        ?.isNotEmpty ==
-                                    true
-                                ? mainProfile.statusMessage!
-                                : '기본 프로필',
-                            avatarUrl: mainProfile.avatarUrl,
-                            isSelected: _defaultSelected,
-                            isDefault: true,
-                            onTap: _selectDefault,
-                          ),
-
-                        // ✨ 2. 서브 프로필 목록
-                        if (subProfiles.isNotEmpty) ...[
-                          const SizedBox(height: 16),
-                          Padding(
-                            padding: const EdgeInsets.only(
-                                left: 4, bottom: 8),
-                            child: Text(
-                              '서브 프로필',
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                  color: AppTheme.textSub),
-                            ),
-                          ),
-                          ...subProfiles.map((profile) {
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
-                              child: _ProfileTile(
-                                name: profile.displayName,
-                                subtitle: profile.statusMessage
-                                            ?.isNotEmpty ==
-                                        true
-                                    ? profile.statusMessage!
-                                    : profile.name,
-                                avatarUrl: profile.avatarUrl,
-                                isSelected: !_defaultSelected &&
-                                    _selectedSubProfileId ==
-                                        profile.id,
-                                isDefault: false,
-                                onTap: () => _selectSub(profile.id),
-                              ),
-                            );
-                          }),
-                        ],
-
-                        // ✨ 3. 새 서브 프로필 만들기 버튼
-                        const SizedBox(height: 16),
-                        InkWell(
-                          onTap: _showCreateProfileSheet,
-                          borderRadius: BorderRadius.circular(14),
-                          child: Container(
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: AppTheme.primary
-                                  .withOpacity(0.08),
-                              borderRadius:
-                                  BorderRadius.circular(14),
-                              border: Border.all(
-                                color: AppTheme.primary
-                                    .withOpacity(0.3),
-                                width: 1.5,
-                              ),
-                            ),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 50, height: 50,
-                                  decoration: BoxDecoration(
-                                    color: AppTheme.primary
-                                        .withOpacity(0.15),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(Icons.add,
-                                      color: AppTheme.primary,
-                                      size: 24),
-                                ),
-                                const SizedBox(width: 14),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                          subProfiles.isEmpty
-                                              ? '새 서브 프로필 만들기'
-                                              : '프로필 추가하기',
-                                          style: TextStyle(
-                                              fontSize: 15,
-                                              fontWeight:
-                                                  FontWeight.w800,
-                                              color: AppTheme
-                                                  .primary)),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                          '다른 닉네임과 아바타로 활동해요',
-                                          style: TextStyle(
-                                              fontSize: 12,
-                                              color:
-                                                  AppTheme.textSub)),
-                                    ],
-                                  ),
-                                ),
-                                Icon(Icons.chevron_right,
-                                    color: AppTheme.primary,
-                                    size: 20),
-                              ],
-                            ),
-                          ),
-                        ),
-
-                        const SizedBox(height: 40),
-                      ],
-                    ),
-                  ),
-
-                  // 하단 입장 버튼
-                  SafeArea(
-                    top: false,
-                    child: Container(
-                      padding: const EdgeInsets.fromLTRB(
-                          20, 12, 20, 12),
-                      decoration: BoxDecoration(
-                        color: AppTheme.bg,
-                        border: Border(
-                            top: BorderSide(color: AppTheme.border)),
-                      ),
-                      child: ElevatedButton(
-                        onPressed: (_defaultSelected &&
-                                    mainProfile != null) ||
-                                _selectedSubProfileId != null
-                            ? () => _confirm(mainProfile, subProfiles)
-                            : null,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppTheme.primary,
-                          foregroundColor: Colors.white,
-                          disabledBackgroundColor: AppTheme.border,
-                          minimumSize:
-                              const Size(double.infinity, 52),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                        ),
-                        child: const Text(
-                          '선택한 프로필로 입장',
-                          style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700),
-                        ),
-                      ),
+                  const SizedBox(width: 8),
+                  Text(
+                    '프로필 선택',
+                    style: TextStyle(
+                      color: AppTheme.textMain,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: -0.5,
                     ),
                   ),
                 ],
-              );
-            },
-          );
-        },
+              ),
+            ),
+
+            Expanded(
+              child: mainProfileAsync.when(
+                loading: () => const Center(
+                    child: CircularProgressIndicator(
+                        color: AppTheme.primary)),
+                error: (e, _) => Center(
+                    child: Text('오류: $e',
+                        style: TextStyle(color: AppTheme.textSub))),
+                data: (mainProfile) {
+                  return subProfilesAsync.when(
+                    loading: () => const Center(
+                        child: CircularProgressIndicator(
+                            color: AppTheme.primary)),
+                    error: (e, _) => Center(
+                        child: Text('오류: $e',
+                            style: TextStyle(
+                                color: AppTheme.textSub))),
+                    data: (subProfiles) {
+                      return Column(
+                        children: [
+                          // ─── 안내 카드 ────────────────────
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(
+                                16, 4, 16, 16),
+                            child: _InfoCard(roomName: widget.roomName),
+                          ),
+
+                          // ─── 프로필 목록 ──────────────────
+                          Expanded(
+                            child: ListView(
+                              padding: const EdgeInsets.fromLTRB(
+                                  16, 0, 16, 16),
+                              physics: const BouncingScrollPhysics(),
+                              children: [
+                                // 기본 프로필
+                                if (mainProfile != null) ...[
+                                  _SectionLabel(
+                                    icon: Icons.star_rounded,
+                                    label: '기본 프로필',
+                                  ),
+                                  const SizedBox(height: 10),
+                                  _ProfileTile(
+                                    name: mainProfile.nickname,
+                                    subtitle: mainProfile
+                                                .statusMessage
+                                                ?.isNotEmpty ==
+                                            true
+                                        ? mainProfile.statusMessage!
+                                        : '내 본 프로필',
+                                    avatarUrl: mainProfile.avatarUrl,
+                                    isSelected: _defaultSelected,
+                                    isDefault: true,
+                                    onTap: _selectDefault,
+                                  ),
+                                ],
+
+                                // 서브 프로필
+                                if (subProfiles.isNotEmpty) ...[
+                                  const SizedBox(height: 20),
+                                  _SectionLabel(
+                                    icon: Icons.theater_comedy_rounded,
+                                    label: '서브 프로필',
+                                    count: subProfiles.length,
+                                  ),
+                                  const SizedBox(height: 10),
+                                  ...subProfiles.map((profile) {
+                                    return Padding(
+                                      padding: const EdgeInsets.only(
+                                          bottom: 10),
+                                      child: _ProfileTile(
+                                        name: profile.displayName,
+                                        subtitle: profile.statusMessage
+                                                    ?.isNotEmpty ==
+                                                true
+                                            ? profile.statusMessage!
+                                            : profile.name,
+                                        avatarUrl: profile.avatarUrl,
+                                        isSelected: !_defaultSelected &&
+                                            _selectedSubProfileId ==
+                                                profile.id,
+                                        isDefault: false,
+                                        onTap: () =>
+                                            _selectSub(profile.id),
+                                      ),
+                                    );
+                                  }),
+                                ],
+
+                                // 추가 버튼
+                                const SizedBox(height: 16),
+                                _AddProfileButton(
+                                  isFirst: subProfiles.isEmpty,
+                                  onTap: _showCreateProfileSheet,
+                                ),
+
+                                const SizedBox(height: 40),
+                              ],
+                            ),
+                          ),
+
+                          // ─── 하단 입장 버튼 ───────────────
+                          SafeArea(
+                            top: false,
+                            child: Container(
+                              padding: const EdgeInsets.fromLTRB(
+                                  16, 12, 16, 12),
+                              decoration: BoxDecoration(
+                                color: AppTheme.bg,
+                                border: Border(
+                                  top: BorderSide(
+                                    color: AppTheme.border
+                                        .withOpacity(0.5),
+                                    width: 0.8,
+                                  ),
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color:
+                                        Colors.black.withOpacity(0.06),
+                                    blurRadius: 8,
+                                    offset: const Offset(0, -2),
+                                  ),
+                                ],
+                              ),
+                              child: _JoinButton(
+                                enabled: (_defaultSelected &&
+                                        mainProfile != null) ||
+                                    _selectedSubProfileId != null,
+                                onTap: () => _confirm(
+                                    mainProfile, subProfiles),
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
 // ═══════════════════════════════════════════════
-// 프로필 타일 위젯 (공통)
+// 원형 글래스 버튼
+// ═══════════════════════════════════════════════
+class _CircleIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final Color iconColor;
+
+  const _CircleIconButton({
+    required this.icon,
+    required this.onTap,
+    required this.iconColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        shape: BoxShape.circle,
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: ClipOval(
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onTap,
+            child: Center(
+              child: Icon(icon, color: iconColor, size: 18),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 안내 카드 (헤더 아래)
+// ═══════════════════════════════════════════════
+class _InfoCard extends StatelessWidget {
+  final String roomName;
+
+  const _InfoCard({required this.roomName});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            AppTheme.primary.withOpacity(0.12),
+            AppTheme.primary.withOpacity(0.04),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: AppTheme.primary.withOpacity(0.25),
+          width: 0.8,
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 50,
+            height: 50,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  AppTheme.primary.withOpacity(0.25),
+                  AppTheme.primary.withOpacity(0.12),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            alignment: Alignment.center,
+            child: const Text('🎭', style: TextStyle(fontSize: 26)),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '어떤 프로필로 참여할까요?',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w900,
+                    color: AppTheme.textMain,
+                    letterSpacing: -0.3,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '"$roomName"에 입장할 프로필을 선택해주세요',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppTheme.textSub,
+                    height: 1.4,
+                    letterSpacing: -0.2,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFBBF24).withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: const Color(0xFFFBBF24).withOpacity(0.3),
+                      width: 0.8,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.warning_rounded,
+                          color: Color(0xFFFBBF24), size: 12),
+                      const SizedBox(width: 4),
+                      Text(
+                        '한 번 선택하면 변경할 수 없어요',
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: const Color(0xFFFBBF24),
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.1,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 섹션 라벨
+// ═══════════════════════════════════════════════
+class _SectionLabel extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final int? count;
+
+  const _SectionLabel({
+    required this.icon,
+    required this.label,
+    this.count,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 4),
+      child: Row(
+        children: [
+          Icon(icon, size: 14, color: AppTheme.textSub),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              color: AppTheme.textSub,
+              letterSpacing: 0.2,
+            ),
+          ),
+          if (count != null) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 6, vertical: 1),
+              decoration: BoxDecoration(
+                color: AppTheme.primary.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                '$count',
+                style: TextStyle(
+                  fontSize: 10,
+                  color: AppTheme.primaryLight,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 프로필 타일
 // ═══════════════════════════════════════════════
 class _ProfileTile extends StatelessWidget {
   final String name;
@@ -492,96 +609,337 @@ class _ProfileTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? AppTheme.primary.withOpacity(0.1)
-              : AppTheme.bgCard,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: isSelected ? AppTheme.primary : AppTheme.border,
-            width: isSelected ? 2 : 1,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            gradient: isSelected
+                ? LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      AppTheme.primary.withOpacity(0.15),
+                      AppTheme.primary.withOpacity(0.05),
+                    ],
+                  )
+                : null,
+            color: isSelected ? null : AppTheme.bgCard,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isSelected
+                  ? AppTheme.primary.withOpacity(0.6)
+                  : AppTheme.border,
+              width: isSelected ? 1.5 : 1,
+            ),
+            boxShadow: isSelected
+                ? [
+                    BoxShadow(
+                      color: AppTheme.primary.withOpacity(0.2),
+                      blurRadius: 14,
+                      offset: const Offset(0, 4),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Row(
+            children: [
+              // 아바타 (선택 시 글로우)
+              Container(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  boxShadow: isSelected
+                      ? [
+                          BoxShadow(
+                            color: AppTheme.primary.withOpacity(0.3),
+                            blurRadius: 12,
+                            spreadRadius: 1,
+                          ),
+                        ]
+                      : null,
+                ),
+                child: AvatarWidget(
+                  url: avatarUrl,
+                  name: name,
+                  size: 52,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            name,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w900,
+                              color: AppTheme.textMain,
+                              letterSpacing: -0.3,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (isDefault) ...[
+                          const SizedBox(width: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  AppTheme.primary.withOpacity(0.2),
+                                  AppTheme.primary.withOpacity(0.1),
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(5),
+                              border: Border.all(
+                                color:
+                                    AppTheme.primary.withOpacity(0.3),
+                                width: 0.6,
+                              ),
+                            ),
+                            child: Text('기본',
+                                style: TextStyle(
+                                    fontSize: 9,
+                                    color: AppTheme.primaryLight,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: -0.1)),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: AppTheme.textSub,
+                          letterSpacing: -0.2),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              // 체크 라디오
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                width: 26,
+                height: 26,
+                decoration: BoxDecoration(
+                  gradient: isSelected
+                      ? LinearGradient(
+                          colors: [
+                            AppTheme.primary,
+                            AppTheme.primary.withOpacity(0.85),
+                          ],
+                        )
+                      : null,
+                  color: isSelected ? null : Colors.transparent,
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: isSelected
+                        ? Colors.transparent
+                        : AppTheme.border,
+                    width: 2,
+                  ),
+                  boxShadow: isSelected
+                      ? [
+                          BoxShadow(
+                            color: AppTheme.primary.withOpacity(0.4),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ]
+                      : null,
+                ),
+                child: isSelected
+                    ? const Icon(Icons.check_rounded,
+                        color: Colors.white, size: 16)
+                    : null,
+              ),
+            ],
           ),
         ),
-        child: Row(
-          children: [
-            AvatarWidget(
-              url: avatarUrl,
-              name: name,
-              size: 50,
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 프로필 추가 버튼
+// ═══════════════════════════════════════════════
+class _AddProfileButton extends StatelessWidget {
+  final bool isFirst;
+  final VoidCallback onTap;
+
+  const _AddProfileButton({
+    required this.isFirst,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                AppTheme.primary.withOpacity(0.12),
+                AppTheme.primary.withOpacity(0.04),
+              ],
             ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          name,
-                          style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w800,
-                              color: AppTheme.textMain),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      if (isDefault) ...[
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: AppTheme.primary.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Text('기본',
-                              style: TextStyle(
-                                  fontSize: 9,
-                                  color: AppTheme.primaryLight,
-                                  fontWeight: FontWeight.w700)),
-                        ),
-                      ],
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: AppTheme.primary.withOpacity(0.35),
+              width: 1.2,
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      AppTheme.primary,
+                      AppTheme.primary.withOpacity(0.85),
                     ],
                   ),
-                  const SizedBox(height: 3),
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppTheme.primary.withOpacity(0.4),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: const Icon(Icons.add_rounded,
+                    color: Colors.white, size: 28),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                        isFirst ? '새 서브 프로필 만들기' : '프로필 추가하기',
+                        style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w900,
+                            color: AppTheme.primary,
+                            letterSpacing: -0.3)),
+                    const SizedBox(height: 3),
+                    Text('다른 닉네임과 아바타로 활동해요',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: AppTheme.textSub,
+                            letterSpacing: -0.2)),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right_rounded,
+                  color: AppTheme.primary, size: 22),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 입장 버튼
+// ═══════════════════════════════════════════════
+class _JoinButton extends StatelessWidget {
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _JoinButton({required this.enabled, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      height: 54,
+      decoration: BoxDecoration(
+        gradient: enabled
+            ? LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  AppTheme.primary,
+                  AppTheme.primary.withOpacity(0.85),
+                ],
+              )
+            : null,
+        color: enabled ? null : AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(15),
+        border: enabled
+            ? null
+            : Border.all(color: AppTheme.border),
+        boxShadow: enabled
+            ? [
+                BoxShadow(
+                  color: AppTheme.primary.withOpacity(0.4),
+                  blurRadius: 14,
+                  offset: const Offset(0, 5),
+                ),
+              ]
+            : null,
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(15),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: enabled ? onTap : null,
+            child: Center(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.login_rounded,
+                    color: enabled
+                        ? Colors.white
+                        : AppTheme.textMuted,
+                    size: 19,
+                  ),
+                  const SizedBox(width: 8),
                   Text(
-                    subtitle,
+                    '선택한 프로필로 입장',
                     style: TextStyle(
-                        fontSize: 12, color: AppTheme.textSub),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      color: enabled
+                          ? Colors.white
+                          : AppTheme.textMuted,
+                      letterSpacing: -0.3,
+                    ),
                   ),
                 ],
               ),
             ),
-            const SizedBox(width: 10),
-            Container(
-              width: 24, height: 24,
-              decoration: BoxDecoration(
-                color: isSelected
-                    ? AppTheme.primary
-                    : Colors.transparent,
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: isSelected
-                      ? AppTheme.primary
-                      : AppTheme.border,
-                  width: 2,
-                ),
-              ),
-              child: isSelected
-                  ? const Icon(Icons.check,
-                      color: Colors.white, size: 16)
-                  : null,
-            ),
-          ],
+          ),
         ),
       ),
     );
@@ -622,32 +980,40 @@ class _CreateProfileSheetState
       context: context,
       backgroundColor: AppTheme.bgCard,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius:
+            BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 36, height: 4,
+              width: 40,
+              height: 4,
               margin: const EdgeInsets.symmetric(vertical: 12),
               decoration: BoxDecoration(
                   color: AppTheme.border,
                   borderRadius: BorderRadius.circular(2)),
             ),
             ListTile(
-              leading: Icon(Icons.camera_alt_outlined,
+              leading: Icon(Icons.camera_alt_rounded,
                   color: AppTheme.textMain),
               title: Text('카메라로 촬영',
-                  style: TextStyle(color: AppTheme.textMain)),
-              onTap: () => Navigator.pop(context, ImageSource.camera),
+                  style: TextStyle(
+                      color: AppTheme.textMain,
+                      fontWeight: FontWeight.w600)),
+              onTap: () =>
+                  Navigator.pop(context, ImageSource.camera),
             ),
             ListTile(
-              leading: Icon(Icons.photo_library_outlined,
+              leading: Icon(Icons.photo_library_rounded,
                   color: AppTheme.textMain),
               title: Text('갤러리에서 선택',
-                  style: TextStyle(color: AppTheme.textMain)),
-              onTap: () => Navigator.pop(context, ImageSource.gallery),
+                  style: TextStyle(
+                      color: AppTheme.textMain,
+                      fontWeight: FontWeight.w600)),
+              onTap: () =>
+                  Navigator.pop(context, ImageSource.gallery),
             ),
             const SizedBox(height: 8),
           ],
@@ -683,8 +1049,7 @@ class _CreateProfileSheetState
       if (_avatarFile != null) {
         final ext = _avatarFile!.path.split('.').last;
         final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final path =
-            'sub-profiles/${user.id}_$timestamp.$ext';
+        final path = 'sub-profiles/${user.id}_$timestamp.$ext';
 
         await supabase.storage.from('kyorangtalk').upload(
               path,
@@ -703,10 +1068,9 @@ class _CreateProfileSheetState
         'nickname': _nicknameController.text.trim().isEmpty
             ? null
             : _nicknameController.text.trim(),
-        'status_message':
-            _statusController.text.trim().isEmpty
-                ? null
-                : _statusController.text.trim(),
+        'status_message': _statusController.text.trim().isEmpty
+            ? null
+            : _statusController.text.trim(),
         if (avatarUrl != null) 'avatar_url': avatarUrl,
         'is_default': false,
       });
@@ -727,6 +1091,8 @@ class _CreateProfileSheetState
   @override
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    final canCreate =
+        _nameController.text.trim().isNotEmpty && !_creating;
 
     return AnimatedPadding(
       duration: const Duration(milliseconds: 150),
@@ -735,162 +1101,238 @@ class _CreateProfileSheetState
         height: MediaQuery.of(context).size.height * 0.85,
         decoration: BoxDecoration(
           color: AppTheme.bgCard,
-          borderRadius: const
-              BorderRadius.vertical(top: Radius.circular(20)),
+          borderRadius: const BorderRadius.vertical(
+              top: Radius.circular(20)),
         ),
         child: Column(
           children: [
+            // 핸들
             Container(
-              width: 36, height: 4,
+              width: 40,
+              height: 4,
               margin: const EdgeInsets.symmetric(vertical: 12),
               decoration: BoxDecoration(
                   color: AppTheme.border,
                   borderRadius: BorderRadius.circular(2)),
             ),
+            // 헤더
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+              padding: const EdgeInsets.fromLTRB(20, 0, 12, 16),
               child: Row(
                 children: [
-                  Text('새 서브 프로필 만들기',
+                  Container(
+                    padding: const EdgeInsets.all(7),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          AppTheme.primary.withOpacity(0.25),
+                          AppTheme.primary.withOpacity(0.12),
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(Icons.theater_comedy_rounded,
+                        color: AppTheme.primary, size: 16),
+                  ),
+                  const SizedBox(width: 10),
+                  Text('새 서브 프로필',
                       style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
-                          color: AppTheme.textMain)),
+                        fontSize: 17,
+                        fontWeight: FontWeight.w900,
+                        color: AppTheme.textMain,
+                        letterSpacing: -0.3,
+                      )),
                   const Spacer(),
-                  TextButton(
-                    onPressed: _creating ||
-                            _nameController.text.trim().isEmpty
-                        ? null
-                        : _create,
-                    child: _creating
-                        ? const SizedBox(
-                            width: 16, height: 16,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: AppTheme.primary))
-                        : const Text('완료',
-                            style: TextStyle(
-                                color: AppTheme.primary,
-                                fontWeight: FontWeight.w700)),
+                  // 완료 버튼
+                  Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: canCreate ? _create : null,
+                      borderRadius: BorderRadius.circular(20),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 18, vertical: 8),
+                        decoration: BoxDecoration(
+                          gradient: canCreate
+                              ? LinearGradient(
+                                  colors: [
+                                    AppTheme.primary,
+                                    AppTheme.primary.withOpacity(0.85),
+                                  ],
+                                )
+                              : null,
+                          color:
+                              canCreate ? null : AppTheme.bg,
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: canCreate
+                              ? [
+                                  BoxShadow(
+                                    color: AppTheme.primary
+                                        .withOpacity(0.35),
+                                    blurRadius: 10,
+                                    offset: const Offset(0, 3),
+                                  ),
+                                ]
+                              : null,
+                        ),
+                        child: _creating
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white))
+                            : Text('완료',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: canCreate
+                                      ? Colors.white
+                                      : AppTheme.textMuted,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: -0.2,
+                                )),
+                      ),
+                    ),
                   ),
                 ],
               ),
             ),
             Expanded(
               child: ListView(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20),
+                physics: const BouncingScrollPhysics(),
                 children: [
+                  // 아바타 선택
                   Center(
                     child: GestureDetector(
                       onTap: _pickAvatar,
                       child: Stack(
                         children: [
                           Container(
-                            width: 90, height: 90,
+                            width: 100,
+                            height: 100,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              color: AppTheme.bg,
+                              gradient: _avatarFile == null
+                                  ? LinearGradient(
+                                      colors: [
+                                        AppTheme.primary
+                                            .withOpacity(0.15),
+                                        AppTheme.primary
+                                            .withOpacity(0.05),
+                                      ],
+                                    )
+                                  : null,
+                              color: _avatarFile == null
+                                  ? null
+                                  : AppTheme.bg,
                               border: Border.all(
-                                  color: AppTheme.border, width: 2),
+                                color: AppTheme.primary
+                                    .withOpacity(0.4),
+                                width: 2,
+                              ),
                               image: _avatarFile != null
                                   ? DecorationImage(
-                                      image: FileImage(_avatarFile!),
+                                      image: FileImage(
+                                          _avatarFile!),
                                       fit: BoxFit.cover,
                                     )
                                   : null,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppTheme.primary
+                                      .withOpacity(0.2),
+                                  blurRadius: 16,
+                                  spreadRadius: 1,
+                                ),
+                              ],
                             ),
                             child: _avatarFile == null
-                                ? Icon(Icons.camera_alt_outlined,
-                                    color: AppTheme.textSub, size: 28)
+                                ? Icon(
+                                    Icons.camera_alt_rounded,
+                                    color: AppTheme.primary,
+                                    size: 32)
                                 : null,
                           ),
                           if (_avatarFile != null)
                             Positioned(
-                              bottom: 0, right: 0,
+                              bottom: 0,
+                              right: 0,
                               child: Container(
-                                width: 28, height: 28,
+                                width: 32,
+                                height: 32,
                                 decoration: BoxDecoration(
-                                  color: AppTheme.primary,
+                                  gradient: LinearGradient(
+                                    colors: [
+                                      AppTheme.primary,
+                                      AppTheme.primary
+                                          .withOpacity(0.85),
+                                    ],
+                                  ),
                                   shape: BoxShape.circle,
                                   border: Border.all(
                                       color: AppTheme.bgCard,
-                                      width: 2),
+                                      width: 3),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: AppTheme.primary
+                                          .withOpacity(0.4),
+                                      blurRadius: 8,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ],
                                 ),
-                                child: const Icon(Icons.edit,
-                                    color: Colors.white, size: 14),
+                                child: const Icon(
+                                    Icons.edit_rounded,
+                                    color: Colors.white,
+                                    size: 14),
                               ),
                             ),
                         ],
                       ),
                     ),
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: 6),
                   Center(
                     child: Text(
                       _avatarFile == null
                           ? '아바타 추가 (선택)'
                           : '아바타 변경',
                       style: TextStyle(
-                          fontSize: 12, color: AppTheme.textSub),
+                        fontSize: 12,
+                        color: AppTheme.textSub,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 28),
 
-                  Text('프로필 이름 *',
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: AppTheme.textSub)),
+                  _FieldLabel(label: '프로필 이름', required: true),
                   const SizedBox(height: 8),
-                  TextField(
+                  _StyledTextField(
                     controller: _nameController,
-                    onChanged: (_) => setState(() {}),
-                    style: TextStyle(color: AppTheme.textMain),
+                    hint: '예) 게임 캐릭터, 익명',
                     maxLength: 20,
-                    decoration: InputDecoration(
-                      hintText: '예) 게임 캐릭터, 익명',
-                      hintStyle: TextStyle(color: AppTheme.textSub),
-                      counterStyle: TextStyle(
-                          color: AppTheme.textSub, fontSize: 11),
-                    ),
+                    onChanged: (_) => setState(() {}),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 16),
 
-                  Text('닉네임 (선택)',
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: AppTheme.textSub)),
+                  _FieldLabel(label: '닉네임', optional: true),
                   const SizedBox(height: 8),
-                  TextField(
+                  _StyledTextField(
                     controller: _nicknameController,
-                    style: TextStyle(color: AppTheme.textMain),
+                    hint: '채팅방에 표시될 이름',
                     maxLength: 15,
-                    decoration: InputDecoration(
-                      hintText: '채팅방에 표시될 이름',
-                      hintStyle: TextStyle(color: AppTheme.textSub),
-                      counterStyle: TextStyle(
-                          color: AppTheme.textSub, fontSize: 11),
-                    ),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 16),
 
-                  Text('상태 메시지 (선택)',
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: AppTheme.textSub)),
+                  _FieldLabel(label: '상태 메시지', optional: true),
                   const SizedBox(height: 8),
-                  TextField(
+                  _StyledTextField(
                     controller: _statusController,
-                    style: TextStyle(color: AppTheme.textMain),
+                    hint: '나를 표현해보세요',
                     maxLength: 30,
-                    decoration: InputDecoration(
-                      hintText: '나를 표현해보세요',
-                      hintStyle: TextStyle(color: AppTheme.textSub),
-                      counterStyle: TextStyle(
-                          color: AppTheme.textSub, fontSize: 11),
-                    ),
                   ),
 
                   const SizedBox(height: 40),
@@ -898,6 +1340,167 @@ class _CreateProfileSheetState
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 필드 라벨
+// ═══════════════════════════════════════════════
+class _FieldLabel extends StatelessWidget {
+  final String label;
+  final bool required;
+  final bool optional;
+
+  const _FieldLabel({
+    required this.label,
+    this.required = false,
+    this.optional = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+            color: AppTheme.textMain,
+            letterSpacing: -0.2,
+          ),
+        ),
+        if (required) ...[
+          const SizedBox(width: 4),
+          Text(
+            '*',
+            style: TextStyle(
+              fontSize: 13,
+              color: const Color(0xFFEF4444),
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+        if (optional) ...[
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(
+                horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(
+              color: AppTheme.bg,
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: Text(
+              '선택',
+              style: TextStyle(
+                fontSize: 9,
+                color: AppTheme.textSub,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 스타일 텍스트 필드 (포커스 효과)
+// ═══════════════════════════════════════════════
+class _StyledTextField extends StatefulWidget {
+  final TextEditingController controller;
+  final String hint;
+  final int maxLength;
+  final ValueChanged<String>? onChanged;
+
+  const _StyledTextField({
+    required this.controller,
+    required this.hint,
+    required this.maxLength,
+    this.onChanged,
+  });
+
+  @override
+  State<_StyledTextField> createState() => _StyledTextFieldState();
+}
+
+class _StyledTextFieldState extends State<_StyledTextField> {
+  final _focusNode = FocusNode();
+  bool _focused = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(() {
+      if (mounted && _focused != _focusNode.hasFocus) {
+        setState(() => _focused = _focusNode.hasFocus);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      decoration: BoxDecoration(
+        color: AppTheme.bg,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: _focused
+              ? AppTheme.primary.withOpacity(0.5)
+              : AppTheme.border,
+          width: _focused ? 1.5 : 1,
+        ),
+        boxShadow: _focused
+            ? [
+                BoxShadow(
+                  color: AppTheme.primary.withOpacity(0.1),
+                  blurRadius: 10,
+                  offset: const Offset(0, 3),
+                ),
+              ]
+            : null,
+      ),
+      child: TextField(
+        controller: widget.controller,
+        focusNode: _focusNode,
+        onChanged: widget.onChanged,
+        style: TextStyle(
+          color: AppTheme.textMain,
+          fontSize: 14.5,
+          fontWeight: FontWeight.w600,
+          letterSpacing: -0.2,
+        ),
+        cursorColor: AppTheme.primary,
+        maxLength: widget.maxLength,
+        decoration: InputDecoration(
+          hintText: widget.hint,
+          hintStyle: TextStyle(
+            color: AppTheme.textMuted,
+            fontWeight: FontWeight.w400,
+          ),
+          counterStyle: TextStyle(
+            color: AppTheme.textMuted,
+            fontSize: 10,
+          ),
+          filled: false,
+          fillColor: Colors.transparent,
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(
+              horizontal: 14, vertical: 12),
+          isDense: true,
         ),
       ),
     );

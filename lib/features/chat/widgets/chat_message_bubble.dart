@@ -3,27 +3,34 @@ import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../../polls/widgets/poll_bubble.dart';
 import '../models/message_model.dart';
-import '../services/link_preview_service.dart';                 // ⭐ NEW
+import '../services/link_preview_service.dart';
 import 'file_bubble.dart';
 import 'game_bubble.dart';
-import 'link_preview_card.dart';                                // ⭐ NEW
-import 'linkified_text.dart';                                   // ⭐ NEW
+import 'link_preview_card.dart';
+import 'linkified_text.dart';
 import 'multi_image_grid.dart';
 import 'reaction_chips.dart';
 import 'voice_message_bubble.dart';
 
 // ═══════════════════════════════════════════════════
-// 📬 메시지 그룹 (날짜별)
+// 💬 MessageBubble — 리디자인
+//
+// 변경:
+// - 내 메시지: primary 그라데이션 + 그림자
+// - 상대 메시지: bgCard 카드 + 미세 보더 + 그림자
+// - 답장 미리보기: 컬러 바 + 미세 배경 (전송자 색에 맞춤)
+// - 모서리: 18px (꼬리 4px) → 더 부드럽게
+// - 시간: 더 작고 미세하게
+// - 검색 하이라이트: primary 글로우
+// - 삭제된 메시지: 흐릿한 이탤릭 + 미세 배경
 // ═══════════════════════════════════════════════════
+
 class MessageGroup {
   final String label;
   final List<MessageModel> items;
   MessageGroup(this.label, this.items);
 }
 
-// ═══════════════════════════════════════════════════
-// 📋 리스트 아이템 (날짜 구분선 or 메시지)
-// ═══════════════════════════════════════════════════
 class MessageListItem {
   final String? dateLabel;
   final MessageModel? message;
@@ -34,9 +41,6 @@ class MessageListItem {
   bool get isDivider => dateLabel != null;
 }
 
-// ═══════════════════════════════════════════════════
-// 💬 메시지 버블 (DM)
-// ═══════════════════════════════════════════════════
 class MessageBubble extends StatelessWidget {
   final MessageModel msg;
   final String roomId;
@@ -65,44 +69,107 @@ class MessageBubble extends StatelessWidget {
     this.onImageLoad,
   });
 
-  // ⭐ 텍스트 메시지 렌더 (URL 자동 감지 + 검색 하이라이트)
+  // ═══════════════════════════════════════════════════
+  // 텍스트 렌더 (URL 자동 감지 + 검색 하이라이트)
+  // ═══════════════════════════════════════════════════
   Widget _buildText(String text) {
     if (msg.isDeleted) {
       return Text(
         '삭제된 메시지예요',
         style: TextStyle(
           color: isMe
-              ? Colors.white.withOpacity(0.7)
+              ? Colors.white.withOpacity(0.75)
               : AppTheme.textSub,
           fontSize: 14,
           height: 1.5,
           fontStyle: FontStyle.italic,
+          letterSpacing: -0.2,
         ),
       );
     }
     return LinkifiedText(
       text: text,
       baseStyle: TextStyle(
-        // ⭐ 보낸 메시지는 보라색 배경이라 흰색 텍스트로 가독성 확보
         color: isMe ? Colors.white : AppTheme.textMain,
-        fontSize: 14,
-        height: 1.5,
+        fontSize: 14.5,
+        height: 1.45,
+        letterSpacing: -0.2,
+        fontWeight: FontWeight.w500,
       ),
       searchQuery: searchQuery,
-      // 보낸 사람 색상에 맞춰 링크 색
       linkColor: isMe
-          ? const Color(0xFFE0F2FE) // 보낸 메시지 (purple bubble): 밝은 하늘색
-          : const Color(0xFF60A5FA), // 받은 메시지: 표준 파랑
+          ? const Color(0xFFE0F2FE)
+          : const Color(0xFF60A5FA),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════
+  // 버블 데코레이션 (내/상대 구분)
+  // ═══════════════════════════════════════════════════
+  BoxDecoration _bubbleDecoration() {
+    final radius = BorderRadius.only(
+      topLeft: const Radius.circular(18),
+      topRight: const Radius.circular(18),
+      bottomLeft: Radius.circular(isMe ? 18 : 4),
+      bottomRight: Radius.circular(isMe ? 4 : 18),
+    );
+
+    if (msg.isDeleted) {
+      return BoxDecoration(
+        color: isMe
+            ? AppTheme.primary.withOpacity(0.4)
+            : AppTheme.bgCard.withOpacity(0.6),
+        borderRadius: radius,
+        border: Border.all(
+          color: isMe
+              ? AppTheme.primary.withOpacity(0.3)
+              : AppTheme.border,
+        ),
+      );
+    }
+
+    if (isMe) {
+      // 내 메시지: primary 그라데이션 + 그림자
+      return BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            AppTheme.primary,
+            AppTheme.primary.withOpacity(0.88),
+          ],
+        ),
+        borderRadius: radius,
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.primary.withOpacity(0.25),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      );
+    }
+
+    // 상대 메시지: 카드 + 미세 보더 + 그림자
+    return BoxDecoration(
+      color: AppTheme.bgCard,
+      borderRadius: radius,
+      border: Border.all(color: AppTheme.border, width: 0.8),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.08),
+          blurRadius: 6,
+          offset: const Offset(0, 2),
+        ),
+      ],
     );
   }
 
   Widget _buildContent(BuildContext context) {
-    // ⭐ 투표 메시지
     if (msg.pollId != null && !msg.isDeleted) {
       return PollBubble(pollId: msg.pollId!, isMe: isMe);
     }
 
-    // ⭐ 파일 메시지
     if (msg.fileUrl != null && !msg.isDeleted) {
       return FileBubble(
         fileUrl: msg.fileUrl!,
@@ -113,7 +180,6 @@ class MessageBubble extends StatelessWidget {
       );
     }
 
-    // ⭐ 게임 메시지
     if (msg.gameData != null && !msg.isDeleted) {
       return GameBubble(
         gameData: msg.gameData!,
@@ -122,7 +188,6 @@ class MessageBubble extends StatelessWidget {
       );
     }
 
-    // ⭐ 음성 메시지
     if (msg.audioUrl != null && !msg.isDeleted) {
       return VoiceMessageBubble(
         messageId: msg.id,
@@ -132,24 +197,15 @@ class MessageBubble extends StatelessWidget {
       );
     }
 
-    // 삭제된 메시지
     if (msg.isDeleted) {
       return Container(
-        decoration: BoxDecoration(
-          color: isMe ? AppTheme.primary : AppTheme.border,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(18),
-            topRight: const Radius.circular(18),
-            bottomLeft: Radius.circular(isMe ? 18 : 4),
-            bottomRight: Radius.circular(isMe ? 4 : 18),
-          ),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: _bubbleDecoration(),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: _buildText(msg.content),
       );
     }
 
-    // ⭐ 이미지 메시지 (단일 + 다중)
     if (msg.allImageUrls.isNotEmpty) {
       return MultiImageGrid(
         imageUrls: msg.allImageUrls,
@@ -159,37 +215,25 @@ class MessageBubble extends StatelessWidget {
       );
     }
 
-    // ⭐⭐⭐ 텍스트 메시지 - 버블 + URL 있으면 미리보기 카드 같이
     final firstUrl = extractFirstUrl(msg.content);
-    print('🔗 [Bubble] msgId=${msg.id} content="${msg.content}" '
-        'firstUrl=$firstUrl');
 
     final bubble = Container(
-      decoration: BoxDecoration(
-        color: isMe ? AppTheme.primary : AppTheme.border,
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(18),
-          topRight: const Radius.circular(18),
-          bottomLeft: Radius.circular(isMe ? 18 : 4),
-          bottomRight: Radius.circular(isMe ? 4 : 18),
-        ),
-      ),
+      decoration: _bubbleDecoration(),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       child: _buildText(msg.content),
     );
 
     if (firstUrl == null) {
-      print('🔗 [Bubble] firstUrl null → bubble만 반환');
       return bubble;
     }
 
-    print('🔗 [Bubble] firstUrl 있음 → Column(bubble + LinkPreviewCard) 반환');
     return Column(
       crossAxisAlignment:
           isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         bubble,
+        const SizedBox(height: 4),
         LinkPreviewCard(url: firstUrl, isMe: isMe),
       ],
     );
@@ -198,108 +242,205 @@ class MessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return RepaintBoundary(
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 4),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 250),
+        margin: const EdgeInsets.only(bottom: 6),
         decoration: isHighlighted
             ? BoxDecoration(
-                color: AppTheme.primary.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(8),
+                gradient: LinearGradient(
+                  colors: [
+                    AppTheme.primary.withOpacity(0.15),
+                    AppTheme.primary.withOpacity(0.05),
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: AppTheme.primary.withOpacity(0.3),
+                ),
               )
             : null,
-        child: Padding(
-          padding: isHighlighted
-              ? const EdgeInsets.symmetric(vertical: 2)
-              : EdgeInsets.zero,
-          child: Column(
-            crossAxisAlignment:
-                isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-            children: [
-              // 답장 미리보기
-              if (msg.replyToContent != null)
-                Padding(
-                  padding: EdgeInsets.only(left: isMe ? 0 : 36, bottom: 2),
+        padding: isHighlighted
+            ? const EdgeInsets.symmetric(vertical: 4, horizontal: 4)
+            : EdgeInsets.zero,
+        child: Column(
+          crossAxisAlignment:
+              isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            // ═══════════════════════════════════════
+            // 답장 미리보기 — 더 세련되게
+            // ═══════════════════════════════════════
+            if (msg.replyToContent != null)
+              Padding(
+                padding: EdgeInsets.only(
+                    left: isMe ? 0 : 36,
+                    right: isMe ? 4 : 0,
+                    bottom: 3),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth:
+                        MediaQuery.of(context).size.width * 0.65,
+                  ),
                   child: Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 6),
+                        horizontal: 10, vertical: 7),
                     decoration: BoxDecoration(
-                      color: AppTheme.border,
+                      color: isMe
+                          ? AppTheme.primary.withOpacity(0.12)
+                          : AppTheme.bgCard.withOpacity(0.7),
                       borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: isMe
+                            ? AppTheme.primary.withOpacity(0.25)
+                            : AppTheme.border,
+                        width: 0.8,
+                      ),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Container(
-                          width: 2,
-                          height: 28,
-                          color: AppTheme.primary,
+                          width: 3,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                AppTheme.primaryLight,
+                                AppTheme.primary,
+                              ],
+                            ),
+                            borderRadius:
+                                BorderRadius.circular(2),
+                          ),
                           margin: const EdgeInsets.only(right: 8),
                         ),
                         Flexible(
-                          child: Text(
-                            msg.replyToContent!,
-                            style: TextStyle(
-                                fontSize: 11, color: AppTheme.textSub),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                          child: Column(
+                            crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                isMe ? '내 메시지에 답장' : partnerName,
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: AppTheme.primaryLight,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: -0.1,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              const SizedBox(height: 1),
+                              Text(
+                                msg.replyToContent!,
+                                style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: AppTheme.textSub,
+                                    height: 1.3),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
                           ),
                         ),
                       ],
                     ),
                   ),
                 ),
+              ),
 
-              // 버블 + 시간 + 아바타
-              Row(
-                mainAxisAlignment:
-                    isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (!isMe) ...[
-                    GestureDetector(
-                      onTap: onAvatarTap,
-                      child: AvatarWidget(
-                          url: partnerAvatar, name: partnerName, size: 28),
-                    ),
-                    const SizedBox(width: 6),
-                  ],
-                  if (isMe) ...[
-                    Text(timeStr,
-                        style: TextStyle(
-                            fontSize: 10, color: AppTheme.textMuted)),
-                    const SizedBox(width: 4),
-                  ],
-                  Flexible(
+            // ═══════════════════════════════════════
+            // 버블 + 시간 + 아바타
+            // ═══════════════════════════════════════
+            Row(
+              mainAxisAlignment: isMe
+                  ? MainAxisAlignment.end
+                  : MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (!isMe) ...[
+                  GestureDetector(
+                    onTap: onAvatarTap,
                     child: Container(
-                      constraints: BoxConstraints(
-                        maxWidth: MediaQuery.of(context).size.width * 0.7,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.15),
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
                       ),
-                      child: _buildContent(context),
+                      child: AvatarWidget(
+                          url: partnerAvatar,
+                          name: partnerName,
+                          size: 30),
                     ),
                   ),
-                  if (!isMe) ...[
-                    const SizedBox(width: 4),
-                    Text(timeStr,
-                        style: TextStyle(
-                            fontSize: 10, color: AppTheme.textMuted)),
-                  ],
+                  const SizedBox(width: 7),
                 ],
-              ),
+                // 내 메시지: 시간을 왼쪽에
+                if (isMe) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      timeStr,
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: AppTheme.textMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                ],
+                Flexible(
+                  child: Container(
+                    constraints: BoxConstraints(
+                      maxWidth:
+                          MediaQuery.of(context).size.width * 0.7,
+                    ),
+                    child: _buildContent(context),
+                  ),
+                ),
+                // 상대 메시지: 시간을 오른쪽에
+                if (!isMe) ...[
+                  const SizedBox(width: 5),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      timeStr,
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: AppTheme.textMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
 
-              // 메시지 반응 칩
-              Padding(
-                padding: EdgeInsets.only(
-                  left: isMe ? 0 : 34,
-                  right: isMe ? 4 : 0,
-                ),
-                child: ReactionChips(
-                  messageId: msg.id,
-                  roomId: roomId,
-                  isGroup: false,
-                  isMe: isMe,
-                ),
+            // ═══════════════════════════════════════
+            // 리액션 칩
+            // ═══════════════════════════════════════
+            Padding(
+              padding: EdgeInsets.only(
+                left: isMe ? 0 : 37,
+                right: isMe ? 4 : 0,
+                top: 2,
               ),
-            ],
-          ),
+              child: ReactionChips(
+                messageId: msg.id,
+                roomId: roomId,
+                isGroup: false,
+                isMe: isMe,
+              ),
+            ),
+          ],
         ),
       ),
     );

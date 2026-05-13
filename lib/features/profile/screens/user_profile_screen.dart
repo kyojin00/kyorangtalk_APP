@@ -6,18 +6,16 @@ import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../../../features/chat/models/chat_room_model.dart';
 import '../../reports/widgets/report_dialog.dart';
+import '../widgets/profile_gallery_section.dart';
+import 'photo_viewer_screen.dart';
 
 // ═══════════════════════════════════════════════════
-// 👤 UserProfileScreen — 시네마틱 리디자인
+// 👤 UserProfileScreen — 시네마틱 + 갤러리
 //
 // 변경:
-// - 배경 그라데이션 더 깊이감 (4단계)
-// - 아바타: 더 큰 사이즈 + 다중 글로우 + 그라데이션 보더
-// - 닉네임: 그라데이션 텍스트 + 강한 그림자
-// - 상태 메시지: 글래스 카드 안에
-// - 액션 버튼: 그라데이션 + 그림자 (primary 강조)
-// - 헤더: 글래스 원형 버튼 (블러)
-// - 부 프로필 뱃지 추가
+// - 프로필 사진 클릭 시 PhotoViewerScreen (큰 뷰)
+// - 갤러리 섹션 추가 (RLS가 권한 자동 필터링)
+// - SingleChildScrollView로 변경 (갤러리 스크롤)
 // ═══════════════════════════════════════════════════
 
 class UserProfileScreen extends StatefulWidget {
@@ -40,6 +38,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
   Map<String, dynamic>? _profile;
   bool _isSubProfile = false;
   List<Map<String, dynamic>> _stickers = [];
+  List<Map<String, dynamic>> _photos = []; // ⭐ 갤러리
   bool _loading = true;
   String _friendStatus = 'none';
   bool _actionLoading = false;
@@ -57,6 +56,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
       _loadProfileWithSubProfile(),
       _loadFriendStatus(),
       _loadBlockStatus(),
+      _loadPhotos(), // ⭐
     ]);
     if (mounted) setState(() => _loading = false);
   }
@@ -114,6 +114,22 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     if (mounted) setState(() => _stickers = List.from(data));
   }
 
+  // ⭐ 갤러리 로드 — RLS가 자동으로 권한 필터링
+  Future<void> _loadPhotos() async {
+  try {
+    final data = await Supabase.instance.client
+        .from('kyorangtalk_profile_photos')
+        .select('id, photo_url, visibility, position, created_at')
+        .eq('user_id', widget.userId)
+        .order('created_at', ascending: false);  // ⭐ 최신이 앞으로
+    if (mounted) {
+      setState(() => _photos = List<Map<String, dynamic>>.from(data));
+    }
+  } catch (e) {
+    print('상대 프로필 사진 로드 실패: $e');
+  }
+}
+
   Future<void> _loadFriendStatus() async {
     final data = await Supabase.instance.client
         .from('kyorangtalk_friends')
@@ -141,25 +157,56 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 
   Future<void> _sendFriendRequest() async {
     setState(() => _actionLoading = true);
-    await Supabase.instance.client.from('kyorangtalk_friends').insert({
-      'requester_id': _myId,
-      'receiver_id': widget.userId,
-      'status': 'pending',
-    });
-    setState(() {
-      _friendStatus = 'pending';
-      _actionLoading = false;
-    });
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('친구 요청을 보냈어요!'),
-          backgroundColor: AppTheme.bgCard,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12)),
-        ),
+    try {
+      await Supabase.instance.client.rpc(
+        'send_friend_request',
+        params: {'target_user_id': widget.userId},
       );
+      setState(() {
+        _friendStatus = 'pending';
+        _actionLoading = false;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('친구 요청을 보냈어요!'),
+            backgroundColor: AppTheme.bgCard,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12)),
+          ),
+        );
+      }
+    } on PostgrestException catch (e) {
+      setState(() => _actionLoading = false);
+      if (mounted) {
+        String msg;
+        if (e.message.contains('already_friends')) {
+          msg = '이미 친구예요';
+        } else if (e.message.contains('already_pending')) {
+          msg = '이미 요청 중이에요';
+        } else if (e.message.contains('blocked')) {
+          msg = '차단된 유저예요';
+        } else {
+          msg = '요청 실패: ${e.message}';
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(msg),
+            backgroundColor: AppTheme.bgCard,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      setState(() => _actionLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+              content: Text('요청 실패: $e'),
+              backgroundColor: AppTheme.bgCard),
+        );
+      }
     }
   }
 
@@ -364,39 +411,18 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     context.push('/main/chat/$roomId', extra: room);
   }
 
+  // ⭐ 큰 뷰어로 교체
   void _showAvatarFullscreen(String url) {
     Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
-        pageBuilder: (_, __, ___) => Scaffold(
-          backgroundColor: Colors.black,
-          body: Stack(
-            children: [
-              GestureDetector(
-                onTap: () => Navigator.pop(context),
-                child: Container(
-                  color: Colors.black,
-                  child: Center(
-                    child: InteractiveViewer(
-                      minScale: 0.5,
-                      maxScale: 4.0,
-                      child: Image.network(url, fit: BoxFit.contain),
-                    ),
-                  ),
-                ),
-              ),
-              SafeArea(
-                child: Padding(
-                  padding: const EdgeInsets.all(4),
-                  child: _GlassIconButton(
-                    icon: Icons.close_rounded,
-                    onTap: () => Navigator.pop(context),
-                  ),
-                ),
-              ),
-            ],
-          ),
+        pageBuilder: (_, __, ___) => PhotoViewerScreen(
+          imageUrls: [url],
+          initialIndex: 0,
+          isOwner: false,
         ),
+        transitionsBuilder: (_, animation, __, child) =>
+            FadeTransition(opacity: animation, child: child),
       ),
     );
   }
@@ -423,6 +449,10 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
     final screenWidth = MediaQuery.of(context).size.width;
     final screenHeight = MediaQuery.of(context).size.height;
 
+    final pixelRatio = MediaQuery.of(context).devicePixelRatio;
+    final bgCacheWidth = (screenWidth * pixelRatio).round();
+    final bgCacheHeight = (screenHeight * pixelRatio).round();
+
     return Scaffold(
       backgroundColor: AppTheme.bg,
       body: _loading
@@ -432,38 +462,44 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
             )
           : Stack(
               children: [
-                // ─── 배경 이미지 ─────────────────────────
+                // 배경
                 Positioned.fill(
                   child: background != null
                       ? Image.network(
                           background,
                           fit: BoxFit.cover,
+                          filterQuality: FilterQuality.high,
+                          cacheWidth: bgCacheWidth,
+                          cacheHeight: bgCacheHeight,
+                          gaplessPlayback: true,
                           errorBuilder: (_, __, ___) =>
                               _DefaultBackground(),
                         )
                       : _DefaultBackground(),
                 ),
 
-                // ─── 배경 어두운 오버레이 ────────────────
+                // 오버레이
                 Positioned.fill(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.black.withOpacity(0.5),
-                          Colors.black.withOpacity(0.2),
-                          AppTheme.bg.withOpacity(0.7),
-                          AppTheme.bg,
-                        ],
-                        stops: const [0.0, 0.35, 0.75, 1.0],
+                  child: IgnorePointer(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Colors.black.withOpacity(0.3),
+                            Colors.transparent,
+                            AppTheme.bg.withOpacity(0.5),
+                            AppTheme.bg,
+                          ],
+                          stops: const [0.0, 0.4, 0.8, 1.0],
+                        ),
                       ),
                     ),
                   ),
                 ),
 
-                // ─── 스티커 ──────────────────────────────
+                // 스티커
                 ..._stickers.map((sticker) {
                   final id = sticker['id'] as String;
                   final emoji = sticker['emoji'] as String;
@@ -479,233 +515,252 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
                     key: ValueKey(id),
                     left: x * screenWidth - size / 2,
                     top: y * screenHeight - size / 2,
-                    child: SizedBox(
-                      width: size,
-                      height: size,
-                      child: Center(
-                        child: Text(emoji,
-                            style: TextStyle(fontSize: size * 0.7)),
+                    child: IgnorePointer(
+                      child: SizedBox(
+                        width: size,
+                        height: size,
+                        child: Center(
+                          child: Text(emoji,
+                              style: TextStyle(fontSize: size * 0.7)),
+                        ),
                       ),
                     ),
                   );
                 }),
 
-                // ─── 본문 ────────────────────────────────
+                // 본문
                 SafeArea(
-                  child: Column(
-                    children: [
-                      // 헤더 — 글래스 버튼
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(
-                            12, 8, 12, 0),
-                        child: Row(
-                          children: [
-                            _GlassIconButton(
-                              icon: Icons.close_rounded,
-                              onTap: () => Navigator.pop(context),
-                            ),
-                            const Spacer(),
-                            if (!isMe)
+                  child: SingleChildScrollView(
+                    physics: const BouncingScrollPhysics(),
+                    child: Column(
+                      children: [
+                        // 헤더
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(
+                              12, 8, 12, 0),
+                          child: Row(
+                            children: [
                               _GlassIconButton(
-                                icon: Icons.more_horiz_rounded,
-                                onTap: () => _showMenu(),
+                                icon: Icons.close_rounded,
+                                onTap: () => Navigator.pop(context),
                               ),
-                          ],
+                              const Spacer(),
+                              if (!isMe)
+                                _GlassIconButton(
+                                  icon: Icons.more_horiz_rounded,
+                                  onTap: () => _showMenu(),
+                                ),
+                            ],
+                          ),
                         ),
-                      ),
 
-                      const Spacer(flex: 2),
+                        SizedBox(
+                            height: screenHeight * 0.15),
 
-                      // 아바타 — 더 큰 사이즈, 다중 글로우, 그라데이션 보더
-                      GestureDetector(
-                        onTap: avatar != null
-                            ? () => _showAvatarFullscreen(avatar)
-                            : null,
-                        child: Stack(
-                          children: [
-                            // 글로우 레이어
-                            Container(
-                              width: 124,
-                              height: 124,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: AppTheme.primary
-                                        .withOpacity(0.4),
-                                    blurRadius: 40,
-                                    spreadRadius: 4,
-                                  ),
-                                  BoxShadow(
-                                    color: AppTheme.primaryLight
-                                        .withOpacity(0.3),
-                                    blurRadius: 60,
-                                    spreadRadius: 8,
-                                  ),
-                                ],
-                              ),
-                            ),
-                            // 그라데이션 보더
-                            Container(
-                              width: 124,
-                              height: 124,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                gradient: LinearGradient(
-                                  begin: Alignment.topLeft,
-                                  end: Alignment.bottomRight,
-                                  colors: [
-                                    AppTheme.primaryLight,
-                                    AppTheme.primary,
+                        // 아바타
+                        GestureDetector(
+                          onTap: avatar != null
+                              ? () => _showAvatarFullscreen(avatar)
+                              : null,
+                          child: Stack(
+                            children: [
+                              Container(
+                                width: 124,
+                                height: 124,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: AppTheme.primary
+                                          .withOpacity(0.4),
+                                      blurRadius: 40,
+                                      spreadRadius: 4,
+                                    ),
+                                    BoxShadow(
+                                      color: AppTheme.primaryLight
+                                          .withOpacity(0.3),
+                                      blurRadius: 60,
+                                      spreadRadius: 8,
+                                    ),
                                   ],
                                 ),
                               ),
-                              padding: const EdgeInsets.all(3),
-                              child: ClipOval(
-                                child: Container(
-                                  color: AppTheme.bg,
-                                  padding:
-                                      const EdgeInsets.all(2),
-                                  child: ClipOval(
-                                    child: AvatarWidget(
-                                      url: avatar,
-                                      name: nickname,
-                                      size: 114,
+                              Container(
+                                width: 124,
+                                height: 124,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                    colors: [
+                                      AppTheme.primaryLight,
+                                      AppTheme.primary,
+                                    ],
+                                  ),
+                                ),
+                                padding: const EdgeInsets.all(3),
+                                child: ClipOval(
+                                  child: Container(
+                                    color: AppTheme.bg,
+                                    padding:
+                                        const EdgeInsets.all(2),
+                                    child: ClipOval(
+                                      child: AvatarWidget(
+                                        url: avatar,
+                                        name: nickname,
+                                        size: 114,
+                                      ),
                                     ),
                                   ),
                                 ),
                               ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-
-                      // 부 프로필 뱃지
-                      if (_isSubProfile)
-                        Container(
-                          margin:
-                              const EdgeInsets.only(bottom: 8),
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color:
-                                AppTheme.primary.withOpacity(0.2),
-                            borderRadius:
-                                BorderRadius.circular(20),
-                            border: Border.all(
-                              color: AppTheme.primary
-                                  .withOpacity(0.4),
-                            ),
+                            ],
                           ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.verified_rounded,
-                                color: AppTheme.primaryLight,
-                                size: 13,
+                        ),
+                        const SizedBox(height: 20),
+
+                        // 부 프로필 뱃지
+                        if (_isSubProfile)
+                          Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color:
+                                  AppTheme.primary.withOpacity(0.2),
+                              borderRadius:
+                                  BorderRadius.circular(20),
+                              border: Border.all(
+                                color: AppTheme.primary
+                                    .withOpacity(0.4),
                               ),
-                              const SizedBox(width: 4),
-                              Text(
-                                '부 프로필',
-                                style: TextStyle(
-                                  fontSize: 11,
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.verified_rounded,
                                   color: AppTheme.primaryLight,
-                                  fontWeight: FontWeight.w800,
+                                  size: 13,
                                 ),
-                              ),
-                            ],
-                          ),
-                        ),
-
-                      // 닉네임 — 그라데이션 + 그림자
-                      ShaderMask(
-                        shaderCallback: (bounds) => LinearGradient(
-                          colors: [
-                            Colors.white,
-                            Colors.white.withOpacity(0.85),
-                          ],
-                        ).createShader(bounds),
-                        child: Text(
-                          nickname,
-                          style: TextStyle(
-                            fontSize: 26,
-                            fontWeight: FontWeight.w900,
-                            color: Colors.white,
-                            letterSpacing: -0.5,
-                            shadows: [
-                              Shadow(
-                                color: Colors.black.withOpacity(0.6),
-                                blurRadius: 12,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-
-                      // 상태 메시지 — 글래스 카드
-                      if (statusMessage != null &&
-                          statusMessage.isNotEmpty) ...[
-                        const SizedBox(height: 14),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 36),
-                          child: ClipRRect(
-                            borderRadius:
-                                BorderRadius.circular(14),
-                            child: BackdropFilter(
-                              filter: ImageFilter.blur(
-                                  sigmaX: 10, sigmaY: 10),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 16, vertical: 10),
-                                decoration: BoxDecoration(
-                                  color: Colors.white
-                                      .withOpacity(0.1),
-                                  borderRadius:
-                                      BorderRadius.circular(14),
-                                  border: Border.all(
-                                    color: Colors.white
-                                        .withOpacity(0.15),
-                                  ),
-                                ),
-                                child: Text(
-                                  statusMessage,
+                                const SizedBox(width: 4),
+                                Text(
+                                  '부 프로필',
                                   style: TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.white
-                                        .withOpacity(0.95),
-                                    fontWeight: FontWeight.w500,
-                                    height: 1.4,
+                                    fontSize: 11,
+                                    color: AppTheme.primaryLight,
+                                    fontWeight: FontWeight.w800,
                                   ),
-                                  textAlign: TextAlign.center,
-                                  maxLines: 3,
-                                  overflow:
-                                      TextOverflow.ellipsis,
+                                ),
+                              ],
+                            ),
+                          ),
+
+                        // 닉네임
+                        ShaderMask(
+                          shaderCallback: (bounds) =>
+                              LinearGradient(
+                            colors: [
+                              Colors.white,
+                              Colors.white.withOpacity(0.85),
+                            ],
+                          ).createShader(bounds),
+                          child: Text(
+                            nickname,
+                            style: TextStyle(
+                              fontSize: 26,
+                              fontWeight: FontWeight.w900,
+                              color: Colors.white,
+                              letterSpacing: -0.5,
+                              shadows: [
+                                Shadow(
+                                  color:
+                                      Colors.black.withOpacity(0.6),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+
+                        // 상태 메시지
+                        if (statusMessage != null &&
+                            statusMessage.isNotEmpty) ...[
+                          const SizedBox(height: 14),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 36),
+                            child: ClipRRect(
+                              borderRadius:
+                                  BorderRadius.circular(14),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(
+                                    sigmaX: 10, sigmaY: 10),
+                                child: Container(
+                                  padding:
+                                      const EdgeInsets.symmetric(
+                                          horizontal: 16,
+                                          vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white
+                                        .withOpacity(0.1),
+                                    borderRadius:
+                                        BorderRadius.circular(14),
+                                    border: Border.all(
+                                      color: Colors.white
+                                          .withOpacity(0.15),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    statusMessage,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      color: Colors.white
+                                          .withOpacity(0.95),
+                                      fontWeight: FontWeight.w500,
+                                      height: 1.4,
+                                    ),
+                                    textAlign: TextAlign.center,
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
+                        ],
 
-                      const Spacer(flex: 3),
+                        const SizedBox(height: 32),
 
-                      // 액션 버튼
-                      if (!isMe)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 24, vertical: 20),
-                          child: _buildActions(
-                            isFriend: isFriend,
-                            isPending: isPending,
+                        // ⭐ 갤러리 (RLS가 자동 필터링)
+                        if (_photos.isNotEmpty)
+                          ProfileGallerySection(
+                            photos: _photos,
+                            isOwner: false,
                           ),
-                        ),
 
-                      const SizedBox(height: 16),
-                    ],
+                        const SizedBox(height: 24),
+
+                        // 액션 버튼
+                        if (!isMe)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 24, vertical: 8),
+                            child: _buildActions(
+                              isFriend: isFriend,
+                              isPending: isPending,
+                            ),
+                          ),
+
+                        SizedBox(
+                            height: MediaQuery.of(context)
+                                    .padding
+                                    .bottom +
+                                24),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -828,7 +883,7 @@ class _UserProfileScreenState extends State<UserProfileScreen> {
 }
 
 // ═══════════════════════════════════════════════════
-// 기본 배경 (이미지 없을 때)
+// 기본 배경
 // ═══════════════════════════════════════════════════
 class _DefaultBackground extends StatelessWidget {
   @override
@@ -887,7 +942,7 @@ class _GlassIconButton extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════
-// Primary 액션 버튼 (그라데이션 + 그림자)
+// Primary 액션 버튼
 // ═══════════════════════════════════════════════════
 class _PrimaryActionButton extends StatelessWidget {
   final IconData icon;
@@ -961,7 +1016,7 @@ class _PrimaryActionButton extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════
-// 정보 바 (차단/대기 중)
+// 정보 바
 // ═══════════════════════════════════════════════════
 class _InfoBar extends StatelessWidget {
   final IconData icon;
@@ -1011,7 +1066,7 @@ class _InfoBar extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════
-// 메뉴 시트 row
+// 메뉴 row
 // ═══════════════════════════════════════════════════
 class _MenuRow extends StatelessWidget {
   final IconData icon;

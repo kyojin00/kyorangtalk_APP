@@ -13,8 +13,18 @@ import '../../polls/widgets/poll_bubble.dart';
 import '../models/group_message_model.dart';
 
 // ═══════════════════════════════════════════════════
-// 💬 그룹 메시지 버블
+// 💬 GroupMessageBubble — 리디자인
+//
+// 변경 (DM과 통일):
+// - 내 메시지: primary 그라데이션 + 그림자
+// - 상대 메시지: bgCard 카드 + 미세 보더 + 그림자
+// - 답장 미리보기: 컬러 바 + 미세 배경
+// - 모서리: 18px (꼬리 4px)
+// - 발신자 닉네임: 더 큰 폰트 + 보더
+// - 시간: w500
+// - 삭제된 메시지: 흐릿한 이탤릭
 // ═══════════════════════════════════════════════════
+
 class GroupMessageBubble extends StatelessWidget {
   final GroupMessageModel msg;
   final String roomId;
@@ -33,16 +43,18 @@ class GroupMessageBubble extends StatelessWidget {
     this.onAvatarTap,
   });
 
-  // ⭐ 텍스트 렌더 - URL 자동 감지 + isMe면 흰색
   Widget _buildText(String text, {bool deleted = false}) {
     if (deleted) {
       return Text(
         '삭제된 메시지예요',
         style: TextStyle(
-          color: isMe ? Colors.white.withOpacity(0.7) : AppTheme.textSub,
+          color: isMe
+              ? Colors.white.withOpacity(0.75)
+              : AppTheme.textSub,
           fontSize: 14,
           height: 1.5,
           fontStyle: FontStyle.italic,
+          letterSpacing: -0.2,
         ),
       );
     }
@@ -50,12 +62,71 @@ class GroupMessageBubble extends StatelessWidget {
       text: text,
       baseStyle: TextStyle(
         color: isMe ? Colors.white : AppTheme.textMain,
-        fontSize: 14,
-        height: 1.5,
+        fontSize: 14.5,
+        height: 1.45,
+        letterSpacing: -0.2,
+        fontWeight: FontWeight.w500,
       ),
       linkColor: isMe
           ? const Color(0xFFE0F2FE)
           : const Color(0xFF60A5FA),
+    );
+  }
+
+  BoxDecoration _bubbleDecoration() {
+    final radius = BorderRadius.only(
+      topLeft: const Radius.circular(18),
+      topRight: const Radius.circular(18),
+      bottomLeft: Radius.circular(isMe ? 18 : 4),
+      bottomRight: Radius.circular(isMe ? 4 : 18),
+    );
+
+    if (msg.isDeleted) {
+      return BoxDecoration(
+        color: isMe
+            ? AppTheme.primary.withOpacity(0.4)
+            : AppTheme.bgCard.withOpacity(0.6),
+        borderRadius: radius,
+        border: Border.all(
+          color: isMe
+              ? AppTheme.primary.withOpacity(0.3)
+              : AppTheme.border,
+        ),
+      );
+    }
+
+    if (isMe) {
+      return BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            AppTheme.primary,
+            AppTheme.primary.withOpacity(0.88),
+          ],
+        ),
+        borderRadius: radius,
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.primary.withOpacity(0.25),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      );
+    }
+
+    return BoxDecoration(
+      color: AppTheme.bgCard,
+      borderRadius: radius,
+      border: Border.all(color: AppTheme.border, width: 0.8),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.08),
+          blurRadius: 6,
+          offset: const Offset(0, 2),
+        ),
+      ],
     );
   }
 
@@ -92,21 +163,13 @@ class GroupMessageBubble extends StatelessWidget {
     }
     if (msg.isDeleted) {
       return Container(
-        decoration: BoxDecoration(
-          color: isMe ? AppTheme.primary : AppTheme.border,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(18),
-            topRight: const Radius.circular(18),
-            bottomLeft: Radius.circular(isMe ? 18 : 4),
-            bottomRight: Radius.circular(isMe ? 4 : 18),
-          ),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: _bubbleDecoration(),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: _buildText('', deleted: true),
       );
     }
 
-    // 이미지 메시지
     if (msg.allImageUrls.isNotEmpty) {
       return MultiImageGrid(
         imageUrls: msg.allImageUrls,
@@ -116,18 +179,9 @@ class GroupMessageBubble extends StatelessWidget {
       );
     }
 
-    // ⭐ 텍스트 메시지 - 버블 + URL 있으면 미리보기 카드
     final firstUrl = extractFirstUrl(msg.content);
     final bubble = Container(
-      decoration: BoxDecoration(
-        color: isMe ? AppTheme.primary : AppTheme.border,
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(18),
-          topRight: const Radius.circular(18),
-          bottomLeft: Radius.circular(isMe ? 18 : 4),
-          bottomRight: Radius.circular(isMe ? 4 : 18),
-        ),
-      ),
+      decoration: _bubbleDecoration(),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       child: _buildText(msg.content),
     );
@@ -140,6 +194,7 @@ class GroupMessageBubble extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         bubble,
+        const SizedBox(height: 4),
         LinkPreviewCard(url: firstUrl, isMe: isMe),
       ],
     );
@@ -149,57 +204,93 @@ class GroupMessageBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     return RepaintBoundary(
       child: Padding(
-        padding: const EdgeInsets.only(bottom: 4),
+        padding: const EdgeInsets.only(bottom: 6),
         child: Column(
           crossAxisAlignment: isMe
               ? CrossAxisAlignment.end
               : CrossAxisAlignment.start,
           children: [
+            // ─── 발신자 닉네임 ──────────
             if (!isMe && showSenderInfo)
               Padding(
-                padding: const EdgeInsets.only(left: 36, bottom: 2),
+                padding: const EdgeInsets.only(left: 38, bottom: 4),
                 child: Text(
                   msg.senderNickname ?? '알 수 없음',
                   style: TextStyle(
-                      fontSize: 11,
-                      color: AppTheme.textSub,
-                      fontWeight: FontWeight.w600),
+                    fontSize: 11.5,
+                    color: AppTheme.textSub,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.2,
+                  ),
                 ),
               ),
 
+            // ─── 답장 미리보기 ──────────
             if (msg.replyToContent != null)
               Padding(
-                padding:
-                    EdgeInsets.only(left: isMe ? 0 : 36, bottom: 2),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: AppTheme.border,
-                    borderRadius: BorderRadius.circular(10),
+                padding: EdgeInsets.only(
+                  left: isMe ? 0 : 38,
+                  right: isMe ? 4 : 0,
+                  bottom: 3,
+                ),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth:
+                        MediaQuery.of(context).size.width * 0.65,
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 2, height: 28,
-                        color: AppTheme.primary,
-                        margin: const EdgeInsets.only(right: 8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 7),
+                    decoration: BoxDecoration(
+                      color: isMe
+                          ? AppTheme.primary.withOpacity(0.12)
+                          : AppTheme.bgCard.withOpacity(0.7),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: isMe
+                            ? AppTheme.primary.withOpacity(0.25)
+                            : AppTheme.border,
+                        width: 0.8,
                       ),
-                      Flexible(
-                        child: Text(
-                          msg.replyToContent!,
-                          style: TextStyle(
-                              fontSize: 11, color: AppTheme.textSub),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 3,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                AppTheme.primaryLight,
+                                AppTheme.primary,
+                              ],
+                            ),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                          margin: const EdgeInsets.only(right: 8),
                         ),
-                      ),
-                    ],
+                        Flexible(
+                          child: Text(
+                            msg.replyToContent!,
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              color: AppTheme.textSub,
+                              height: 1.3,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
 
+            // ─── 메시지 본문 ──────────
             Row(
               mainAxisAlignment: isMe
                   ? MainAxisAlignment.end
@@ -208,45 +299,78 @@ class GroupMessageBubble extends StatelessWidget {
               children: [
                 if (!isMe)
                   SizedBox(
-                    width: 30,
+                    width: 32,
                     child: showSenderInfo
                         ? GestureDetector(
                             onTap: onAvatarTap,
-                            child: AvatarWidget(
-                                url:  msg.senderAvatar,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black
+                                        .withOpacity(0.15),
+                                    blurRadius: 4,
+                                    offset: const Offset(0, 2),
+                                  ),
+                                ],
+                              ),
+                              child: AvatarWidget(
+                                url: msg.senderAvatar,
                                 name: msg.senderNickname,
-                                size: 28),
+                                size: 30,
+                              ),
+                            ),
                           )
                         : null,
                   ),
                 if (!isMe) const SizedBox(width: 6),
                 if (isMe) ...[
-                  Text(timeStr,
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      timeStr,
                       style: TextStyle(
-                          fontSize: 10, color: AppTheme.textMuted)),
-                  const SizedBox(width: 4),
+                        fontSize: 10,
+                        color: AppTheme.textMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 5),
                 ],
                 Flexible(
                   child: Container(
                     constraints: BoxConstraints(
-                      maxWidth: MediaQuery.of(context).size.width * 0.7,
+                      maxWidth:
+                          MediaQuery.of(context).size.width * 0.7,
                     ),
                     child: _buildContent(context),
                   ),
                 ),
                 if (!isMe) ...[
-                  const SizedBox(width: 4),
-                  Text(timeStr,
+                  const SizedBox(width: 5),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      timeStr,
                       style: TextStyle(
-                          fontSize: 10, color: AppTheme.textMuted)),
+                        fontSize: 10,
+                        color: AppTheme.textMuted,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
                 ],
               ],
             ),
 
+            // ─── 리액션 ──────────
             Padding(
               padding: EdgeInsets.only(
-                left: isMe ? 0 : 36,
+                left: isMe ? 0 : 38,
                 right: isMe ? 4 : 0,
+                top: 2,
               ),
               child: ReactionChips(
                 messageId: msg.id,

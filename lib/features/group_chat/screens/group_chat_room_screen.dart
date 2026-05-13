@@ -27,6 +27,9 @@ import '../models/group_message_model.dart';
 import '../providers/group_chat_provider.dart';
 import '../widgets/group_chat_app_bar.dart';
 import '../widgets/group_message_bubble.dart';
+import '../widgets/group_reply_preview.dart';
+import '../widgets/group_disabled_input.dart';
+import '../widgets/group_empty_state.dart';
 import '../widgets/system_message.dart';
 import 'group_members_screen.dart';
 import 'group_room_info_screen.dart';
@@ -42,7 +45,7 @@ class GroupChatRoomScreen extends ConsumerStatefulWidget {
 
 class _GroupChatRoomScreenState
     extends ConsumerState<GroupChatRoomScreen> {
-  final _inputController  = TextEditingController();
+  final _inputController = TextEditingController();
   final _scrollController = ScrollController();
   final _focusNode = FocusNode();
   final _myId = Supabase.instance.client.auth.currentUser!.id;
@@ -73,10 +76,20 @@ class _GroupChatRoomScreenState
   Timer? _draftSaveDebouncer;
   Timer? _markReadDebouncer;
 
+  // ⭐ 실시간 인원수
+  int _memberCount = 0;
+  RealtimeChannel? _memberChannel;
+
   @override
   void initState() {
     super.initState();
     currentOpenGroupRoomId = widget.room.id;
+
+    // ⭐ 멤버 카운트 초기화 + 구독
+    _memberCount = widget.room.memberCount;
+    _subscribeMemberChanges();
+    _refreshMemberCount();
+
     _markAsRead();
     _loadMuteStatus();
     _loadFailedMessages();
@@ -93,6 +106,46 @@ class _GroupChatRoomScreenState
     });
 
     _scrollController.addListener(_handleScroll);
+  }
+
+  // ═══════════════════════════════════════════════════
+  // ⭐ 실시간 멤버 카운트
+  // ═══════════════════════════════════════════════════
+  void _subscribeMemberChanges() {
+    try {
+      _memberChannel = Supabase.instance.client
+          .channel('group_members_${widget.room.id}')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'kyorangtalk_group_members',
+            filter: PostgresChangeFilter(
+              type: PostgresChangeFilterType.eq,
+              column: 'room_id',
+              value: widget.room.id,
+            ),
+            callback: (_) {
+              if (!_disposed && mounted) _refreshMemberCount();
+            },
+          )
+          .subscribe();
+    } catch (e) {
+      print('멤버 채널 구독 실패: $e');
+    }
+  }
+
+  Future<void> _refreshMemberCount() async {
+    try {
+      final result = await Supabase.instance.client
+          .from('kyorangtalk_group_members')
+          .select('user_id')
+          .eq('room_id', widget.room.id);
+      if (!_disposed && mounted) {
+        setState(() => _memberCount = (result as List).length);
+      }
+    } catch (e) {
+      print('멤버 카운트 새로고침 실패: $e');
+    }
   }
 
   void _onInputChanged() {
@@ -181,6 +234,12 @@ class _GroupChatRoomScreenState
   void dispose() {
     _disposed = true;
     currentOpenGroupRoomId = null;
+
+    // ⭐ 멤버 채널 해제
+    if (_memberChannel != null) {
+      Supabase.instance.client.removeChannel(_memberChannel!);
+    }
+
     _draftSaveDebouncer?.cancel();
     _markReadDebouncer?.cancel();
     DraftStore.save(
@@ -230,7 +289,8 @@ class _GroupChatRoomScreenState
           curve: Curves.easeOut,
         );
       } else {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        _scrollController
+            .jumpTo(_scrollController.position.maxScrollExtent);
       }
     });
   }
@@ -241,16 +301,19 @@ class _GroupChatRoomScreenState
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_disposed || !mounted) return;
       if (!_scrollController.hasClients) return;
-      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      _scrollController
+          .jumpTo(_scrollController.position.maxScrollExtent);
     });
     Future.delayed(const Duration(milliseconds: 100), () {
       if (!_disposed && mounted && _scrollController.hasClients) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        _scrollController
+            .jumpTo(_scrollController.position.maxScrollExtent);
       }
     });
     Future.delayed(const Duration(milliseconds: 300), () {
       if (!_disposed && mounted && _scrollController.hasClients) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        _scrollController
+            .jumpTo(_scrollController.position.maxScrollExtent);
       }
     });
   }
@@ -288,18 +351,14 @@ class _GroupChatRoomScreenState
     final previewText = _getGamePreviewText(gameData);
     try {
       await sendGroupMessage(
-        roomId:   widget.room.id,
+        roomId: widget.room.id,
         senderId: _myId,
-        content:  previewText,
+        content: previewText,
         gameData: gameData,
       );
       _scrollToBottom();
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('게임 전송 실패: $e')),
-        );
-      }
+      if (mounted) _showSnack('게임 전송 실패: $e');
     }
   }
 
@@ -324,18 +383,14 @@ class _GroupChatRoomScreenState
     if (pollId == null || !mounted) return;
     try {
       await sendGroupMessage(
-        roomId:   widget.room.id,
+        roomId: widget.room.id,
         senderId: _myId,
-        content:  '투표가 생성됐어요',
-        pollId:   pollId,
+        content: '투표가 생성됐어요',
+        pollId: pollId,
       );
       _scrollToBottom();
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('투표 전송 실패: $e')),
-        );
-      }
+      if (mounted) _showSnack('투표 전송 실패: $e');
     }
   }
 
@@ -345,36 +400,7 @@ class _GroupChatRoomScreenState
     if (picked == null || !mounted) return;
     setState(() => _sending = true);
 
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => Center(
-        child: Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: AppTheme.bgCard,
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const CircularProgressIndicator(color: AppTheme.primary),
-              const SizedBox(height: 16),
-              Text('파일 업로드 중...',
-                  style: TextStyle(
-                      color: AppTheme.textMain,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600)),
-              const SizedBox(height: 4),
-              Text(picked.name,
-                  style: TextStyle(color: AppTheme.textSub, fontSize: 12),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis),
-            ],
-          ),
-        ),
-      ),
-    );
+    _showUploadDialog(picked.name);
 
     try {
       final fileUrl = await uploadFile(
@@ -384,10 +410,10 @@ class _GroupChatRoomScreenState
         roomType: 'group',
       );
       await sendGroupMessage(
-        roomId:   widget.room.id,
+        roomId: widget.room.id,
         senderId: _myId,
-        content:  '[파일]',
-        fileUrl:  fileUrl,
+        content: '[파일]',
+        fileUrl: fileUrl,
         fileName: picked.name,
         fileSize: picked.size,
         fileType: picked.extension,
@@ -401,11 +427,44 @@ class _GroupChatRoomScreenState
       if (mounted) {
         Navigator.pop(context);
         setState(() => _sending = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('파일 전송 실패: $e')),
-        );
+        _showSnack('파일 전송 실패: $e');
       }
     }
+  }
+
+  void _showUploadDialog(String fileName) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => Center(
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: AppTheme.bgCard,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: AppTheme.border),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(color: AppTheme.primary),
+              const SizedBox(height: 16),
+              Text('파일 업로드 중...',
+                  style: TextStyle(
+                      color: AppTheme.textMain,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700)),
+              const SizedBox(height: 4),
+              Text(fileName,
+                  style: TextStyle(
+                      color: AppTheme.textSub, fontSize: 12),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _recordVoice() async {
@@ -431,9 +490,7 @@ class _GroupChatRoomScreenState
     } catch (e) {
       if (!_disposed && mounted) {
         setState(() => _sending = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('음성 전송 실패: $e')),
-        );
+        _showSnack('음성 전송 실패: $e');
       }
     }
   }
@@ -466,10 +523,10 @@ class _GroupChatRoomScreenState
 
     try {
       await sendGroupMessage(
-        roomId:         widget.room.id,
-        senderId:       _myId,
-        content:        content,
-        replyToId:      reply?.id,
+        roomId: widget.room.id,
+        senderId: _myId,
+        content: content,
+        replyToId: reply?.id,
         replyToContent: reply?.content,
       );
 
@@ -505,10 +562,10 @@ class _GroupChatRoomScreenState
 
     try {
       await sendGroupMessage(
-        roomId:         msg.roomId,
-        senderId:       _myId,
-        content:        msg.content,
-        replyToId:      msg.replyToId,
+        roomId: msg.roomId,
+        senderId: _myId,
+        content: msg.content,
+        replyToId: msg.replyToId,
         replyToContent: msg.replyToContent,
       );
       await PendingMessageStore.remove(msg.id);
@@ -532,12 +589,7 @@ class _GroupChatRoomScreenState
           if (idx >= 0) _failedMessages[idx] = updated;
           _retryingIds.remove(msg.id);
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('재전송에 실패했어요. 잠시 후 다시 시도해주세요'),
-            duration: Duration(seconds: 2),
-          ),
-        );
+        _showSnack('재전송에 실패했어요. 잠시 후 다시 시도해주세요');
       }
     }
   }
@@ -564,7 +616,7 @@ class _GroupChatRoomScreenState
       setState(() => _sending = true);
       try {
         final file = File(picked.path);
-        final ext  = picked.path.split('.').last;
+        final ext = picked.path.split('.').last;
         final path =
             'group/${widget.room.id}/${DateTime.now().millisecondsSinceEpoch}.$ext';
         await Supabase.instance.client.storage
@@ -575,9 +627,9 @@ class _GroupChatRoomScreenState
             .from('kyorangtalk')
             .getPublicUrl(path);
         await sendGroupMessage(
-          roomId:   widget.room.id,
+          roomId: widget.room.id,
           senderId: _myId,
-          content:  '[이미지]',
+          content: '[이미지]',
           imageUrl: url,
         );
         if (!_disposed && mounted) {
@@ -586,9 +638,7 @@ class _GroupChatRoomScreenState
         }
       } catch (e) {
         if (!_disposed && mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(e.toString().replaceAll('Exception: ', ''))),
-          );
+          _showSnack(e.toString().replaceAll('Exception: ', ''));
           setState(() => _sending = false);
         }
       }
@@ -615,18 +665,15 @@ class _GroupChatRoomScreenState
 
     try {
       await sendGroupMessage(
-        roomId:    widget.room.id,
-        senderId:  _myId,
-        content:   urls.length == 1 ? '[이미지]' : '[이미지 ${urls.length}장]',
+        roomId: widget.room.id,
+        senderId: _myId,
+        content:
+            urls.length == 1 ? '[이미지]' : '[이미지 ${urls.length}장]',
         imageUrls: urls,
       );
       if (!_disposed && mounted) _scrollToBottom(delayMs: 500);
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('이미지 전송 실패: $e')),
-        );
-      }
+      if (mounted) _showSnack('이미지 전송 실패: $e');
     }
   }
 
@@ -640,11 +687,20 @@ class _GroupChatRoomScreenState
 
   void _copyMessage(String content) {
     Clipboard.setData(ClipboardData(text: content));
+    _showSnack('메시지가 복사됐어요');
+  }
+
+  void _showSnack(String msg) {
+    if (_disposed || !mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('메시지가 복사됐어요'),
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: AppTheme.bgCard,
         behavior: SnackBarBehavior.floating,
-        duration: Duration(seconds: 2),
+        duration: const Duration(seconds: 2),
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 80),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12)),
       ),
     );
   }
@@ -653,22 +709,24 @@ class _GroupChatRoomScreenState
     final isMe = msg.senderId == _myId;
     final isVoice = msg.audioUrl != null;
     final isImage = msg.isImageMessage;
-    final isGame  = msg.gameData != null;
-    final isPoll  = msg.pollId != null;
-    final isFile  = msg.fileUrl != null;
+    final isGame = msg.gameData != null;
+    final isPoll = msg.pollId != null;
+    final isFile = msg.fileUrl != null;
     final isSpecial = isVoice || isImage || isGame || isPoll || isFile;
 
     showModalBottomSheet(
       context: context,
       backgroundColor: AppTheme.bgCard,
       shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+          borderRadius:
+              BorderRadius.vertical(top: Radius.circular(20))),
       builder: (sheetCtx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Container(
-              width: 36, height: 4,
+              width: 40,
+              height: 4,
               margin: const EdgeInsets.symmetric(vertical: 12),
               decoration: BoxDecoration(
                   color: AppTheme.border,
@@ -693,7 +751,9 @@ class _GroupChatRoomScreenState
                 leading: Icon(Icons.reply_rounded,
                     color: AppTheme.textMain),
                 title: Text('답장',
-                    style: TextStyle(color: AppTheme.textMain)),
+                    style: TextStyle(
+                        color: AppTheme.textMain,
+                        fontWeight: FontWeight.w600)),
                 onTap: () {
                   Navigator.pop(sheetCtx);
                   setState(() => _replyTo = msg);
@@ -703,10 +763,12 @@ class _GroupChatRoomScreenState
 
             if (!isSpecial && !msg.isDeleted)
               ListTile(
-                leading: Icon(Icons.copy_outlined,
+                leading: Icon(Icons.copy_rounded,
                     color: AppTheme.textMain),
                 title: Text('복사',
-                    style: TextStyle(color: AppTheme.textMain)),
+                    style: TextStyle(
+                        color: AppTheme.textMain,
+                        fontWeight: FontWeight.w600)),
                 onTap: () {
                   Navigator.pop(sheetCtx);
                   _copyMessage(msg.content);
@@ -715,12 +777,12 @@ class _GroupChatRoomScreenState
 
             if (isMe && !msg.isDeleted)
               ListTile(
-                leading: const Icon(Icons.delete_outline,
+                leading: const Icon(Icons.delete_outline_rounded,
                     color: Color(0xFFEF4444)),
                 title: const Text('삭제',
                     style: TextStyle(
                         color: Color(0xFFEF4444),
-                        fontWeight: FontWeight.w600)),
+                        fontWeight: FontWeight.w700)),
                 onTap: () {
                   Navigator.pop(sheetCtx);
                   _deleteMessage(msg.id);
@@ -743,20 +805,21 @@ class _GroupChatRoomScreenState
     ).then((_) {
       if (!_disposed && mounted) {
         _loadMuteStatus();
+        _refreshMemberCount(); // ⭐ 정보 화면 다녀온 후 멤버 수도 갱신
       }
     });
   }
 
   String _timeStr(DateTime dt) {
-    final h    = dt.hour;
-    final m    = dt.minute.toString().padLeft(2, '0');
+    final h = dt.hour;
+    final m = dt.minute.toString().padLeft(2, '0');
     final ampm = h < 12 ? '오전' : '오후';
     final hour = h % 12 == 0 ? 12 : h % 12;
     return '$ampm $hour:$m';
   }
 
   String _dateLabel(DateTime dt) {
-    final now  = DateTime.now();
+    final now = DateTime.now();
     final diff = DateTime(now.year, now.month, now.day)
         .difference(DateTime(dt.year, dt.month, dt.day))
         .inDays;
@@ -765,13 +828,15 @@ class _GroupChatRoomScreenState
     return '${dt.year}.${dt.month}.${dt.day}';
   }
 
-  List<_MessageGroup> _getGroupedMessages(List<GroupMessageModel> messages) {
+  List<_MessageGroup> _getGroupedMessages(
+      List<GroupMessageModel> messages) {
     if (_lastMessages != null &&
         _lastMessages!.length == messages.length &&
         identical(_lastMessages!.last, messages.last)) {
       return _cachedGroups;
     }
-    final sorted = [...messages]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final sorted = [...messages]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
     final groups = <_MessageGroup>[];
     String? currentLabel;
     List<GroupMessageModel> currentItems = [];
@@ -802,7 +867,8 @@ class _GroupChatRoomScreenState
   @override
   Widget build(BuildContext context) {
     final msgsAsync = ref.watch(groupMessagesProvider(widget.room.id));
-    final hasAdminAsync = ref.watch(hasRoomAdminProvider(widget.room.id));
+    final hasAdminAsync =
+        ref.watch(hasRoomAdminProvider(widget.room.id));
     final hasAdmin = hasAdminAsync.value ?? true;
 
     ref.listen(groupMessagesProvider(widget.room.id), (prev, next) {
@@ -859,6 +925,13 @@ class _GroupChatRoomScreenState
             }
             _scheduleMarkAsRead();
           }
+
+          // ⭐ 시스템 메시지(입장/퇴장)가 있으면 멤버 수 갱신
+          final hasSystemMsg =
+              newMessages.any((m) => m.msgType == 'system');
+          if (hasSystemMsg) {
+            _refreshMemberCount();
+          }
         }
       });
     });
@@ -866,13 +939,14 @@ class _GroupChatRoomScreenState
     return Scaffold(
       backgroundColor: AppTheme.bg,
       resizeToAvoidBottomInset: true,
-      // ⭐ 분리된 AppBar 위젯 사용
+      // ⭐ 실시간 memberCount 전달
       appBar: buildGroupChatAppBar(
         context: context,
         room: widget.room,
         isMuted: _isMuted,
         onTitleTap: _openRoomInfo,
         onMenuTap: _openRoomInfo,
+        memberCount: _memberCount,
       ),
 
       body: SafeArea(
@@ -882,30 +956,20 @@ class _GroupChatRoomScreenState
             Expanded(
               child: msgsAsync.when(
                 loading: () => const Center(
-                    child: CircularProgressIndicator(color: AppTheme.primary)),
+                    child: CircularProgressIndicator(
+                        color: AppTheme.primary)),
                 error: (e, _) => Center(
                     child: Text('오류: $e',
-                        style: TextStyle(color: AppTheme.textSub))),
+                        style:
+                            TextStyle(color: AppTheme.textSub))),
                 data: (messages) {
                   if (messages.isEmpty &&
                       _failedMessages.isEmpty &&
                       _optimisticMessages.isEmpty) {
-                    return Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Text('💬', style: TextStyle(fontSize: 40)),
-                          const SizedBox(height: 12),
-                          Text('${widget.room.name}에서 대화를 시작해보세요!',
-                              style: TextStyle(
-                                  color: AppTheme.textSub, fontSize: 13)),
-                        ],
-                      ),
-                    );
+                    return GroupEmptyState(roomName: widget.room.name);
                   }
 
                   final groups = _getGroupedMessages(messages);
-
                   final items = <_ListItem>[];
 
                   if (_isPaginating) {
@@ -935,7 +999,8 @@ class _GroupChatRoomScreenState
 
                   if (_failedMessages.isNotEmpty) {
                     final sortedFailed = [..._failedMessages]
-                      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+                      ..sort((a, b) =>
+                          a.createdAt.compareTo(b.createdAt));
                     for (final f in sortedFailed) {
                       items.add(_ListItem.failedMessage(f));
                     }
@@ -954,7 +1019,8 @@ class _GroupChatRoomScreenState
 
                       if (item.isLoadingIndicator) {
                         return const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 12),
+                          padding:
+                              EdgeInsets.symmetric(vertical: 12),
                           child: Center(
                             child: SizedBox(
                               width: 22,
@@ -970,7 +1036,8 @@ class _GroupChatRoomScreenState
 
                       if (item.isStartOfChatMarker) {
                         return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          padding: const EdgeInsets.symmetric(
+                              vertical: 16),
                           child: Center(
                             child: Text(
                               '대화의 시작이에요',
@@ -984,19 +1051,7 @@ class _GroupChatRoomScreenState
                       }
 
                       if (item.isDivider) {
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          child: Row(children: [
-                            Expanded(child: Divider(color: AppTheme.border)),
-                            Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 10),
-                              child: Text(item.dateLabel!,
-                                  style: TextStyle(
-                                      color: AppTheme.textMuted, fontSize: 11)),
-                            ),
-                            Expanded(child: Divider(color: AppTheme.border)),
-                          ]),
-                        );
+                        return _DateDivider(label: item.dateLabel!);
                       }
 
                       if (item.isOptimistic) {
@@ -1017,7 +1072,8 @@ class _GroupChatRoomScreenState
                           child: FailedMessageBubble(
                             message: f,
                             timeStr: _timeStr(f.createdAt),
-                            isRetrying: _retryingIds.contains(f.id),
+                            isRetrying:
+                                _retryingIds.contains(f.id),
                             onRetry: () => _retryFailedMessage(f),
                             onCancel: () => _cancelFailedMessage(f),
                           ),
@@ -1034,29 +1090,33 @@ class _GroupChatRoomScreenState
                       final isMe = msg.senderId == _myId;
                       final isPrevSystem = prev?.msgType == 'system';
                       final showSenderInfo = !isMe &&
-                          (prev?.senderId != msg.senderId || isPrevSystem);
+                          (prev?.senderId != msg.senderId ||
+                              isPrevSystem);
                       final key = _getKeyFor(msg.id);
 
                       return GestureDetector(
                         key: key,
                         onLongPress: () => _showMessageOptions(msg),
                         child: GroupMessageBubble(
-                          msg:            msg,
-                          roomId:         widget.room.id,
-                          isMe:           isMe,
+                          msg: msg,
+                          roomId: widget.room.id,
+                          isMe: isMe,
                           showSenderInfo: showSenderInfo,
-                          timeStr:        _timeStr(msg.createdAt),
+                          timeStr: _timeStr(msg.createdAt),
                           onAvatarTap: isMe
                               ? null
                               : () {
                                   Navigator.push(
                                     context,
                                     MaterialPageRoute(
-                                      builder: (_) => UserProfileScreen(
+                                      builder: (_) =>
+                                          UserProfileScreen(
                                         userId: msg.senderId,
                                         nickname:
-                                            msg.senderNickname ?? '알 수 없음',
-                                        avatarUrl: msg.senderAvatar,
+                                            msg.senderNickname ??
+                                                '알 수 없음',
+                                        avatarUrl:
+                                            msg.senderAvatar,
                                       ),
                                     ),
                                   );
@@ -1070,126 +1130,71 @@ class _GroupChatRoomScreenState
             ),
 
             if (_replyTo != null && hasAdmin)
-              Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 16, vertical: 10),
-                decoration: BoxDecoration(
-                  color: AppTheme.bgCard,
-                  border: Border(
-                      top: BorderSide(color: AppTheme.border),
-                      bottom: BorderSide(color: AppTheme.border)),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 3, height: 36,
-                      decoration: BoxDecoration(
-                        color: AppTheme.primary,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _replyTo!.senderNickname ?? '알 수 없음',
-                            style: const TextStyle(
-                                fontSize: 12,
-                                color: AppTheme.primary,
-                                fontWeight: FontWeight.w700),
-                          ),
-                          Text(
-                            _replyTo!.content,
-                            style: TextStyle(
-                                fontSize: 12, color: AppTheme.textSub),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      ),
-                    ),
-                    IconButton(
-                      icon: Icon(Icons.close,
-                          color: AppTheme.textSub, size: 18),
-                      onPressed: () => setState(() => _replyTo = null),
-                    ),
-                  ],
-                ),
+              GroupReplyPreview(
+                replyTo: _replyTo!,
+                onCancel: () => setState(() => _replyTo = null),
               ),
 
-            if (!hasAdmin) _buildDisabledInput() else _buildActiveInput(),
+            if (!hasAdmin)
+              const GroupDisabledInput()
+            else
+              ChatInputBar(
+                controller: _inputController,
+                focusNode: _focusNode,
+                enabled: true,
+                sending: false,
+                onAttachment: _handleAttachment,
+                onSend: _send,
+              ),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildDisabledInput() {
-    return SafeArea(
-      top: false,
-      child: Container(
-        decoration: BoxDecoration(
-          border: Border(top: BorderSide(color: AppTheme.border)),
-          color: AppTheme.bgCard,
-        ),
-        padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 36, height: 36,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFEF4444).withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Icon(Icons.lock_outline,
-                      color: Color(0xFFEF4444), size: 18),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '방장이 나가서 더 이상 대화할 수 없어요',
-                        style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            color: AppTheme.textMain),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        '이전 대화 내용은 계속 볼 수 있어요',
-                        style: TextStyle(
-                            fontSize: 11, color: AppTheme.textSub),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildActiveInput() {
-    return ChatInputBar(
-      controller: _inputController,
-      focusNode: _focusNode,
-      enabled: true,
-      sending: false,
-      onAttachment: _handleAttachment,
-      onSend: _send,
     );
   }
 }
 
+// ═══════════════════════════════════════════════════
+// 날짜 구분선
+// ═══════════════════════════════════════════════════
+class _DateDivider extends StatelessWidget {
+  final String label;
+
+  const _DateDivider({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Center(
+        child: Container(
+          padding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+          decoration: BoxDecoration(
+            color: AppTheme.bgCard,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: AppTheme.border.withOpacity(0.6),
+              width: 0.8,
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: AppTheme.textSub,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.1,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// Optimistic 메시지
+// ═══════════════════════════════════════════════════
 class _OptimisticMessage {
   final String localId;
   final String content;
@@ -1218,19 +1223,19 @@ class _OptimisticBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.only(bottom: 6),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.end,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Padding(
-            padding: const EdgeInsets.only(right: 6, bottom: 2),
+            padding: const EdgeInsets.only(right: 5, bottom: 3),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
-                  Icons.schedule,
+                  Icons.schedule_rounded,
                   size: 11,
                   color: AppTheme.textMuted,
                 ),
@@ -1240,6 +1245,7 @@ class _OptimisticBubble extends StatelessWidget {
                   style: TextStyle(
                     fontSize: 10,
                     color: AppTheme.textMuted,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
               ],
@@ -1247,16 +1253,23 @@ class _OptimisticBubble extends StatelessWidget {
           ),
           Flexible(
             child: Opacity(
-              opacity: 0.65,
+              opacity: 0.7,
               child: Container(
                 padding: const EdgeInsets.symmetric(
                     horizontal: 14, vertical: 10),
                 decoration: BoxDecoration(
-                  color: AppTheme.primary,
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      AppTheme.primary,
+                      AppTheme.primary.withOpacity(0.88),
+                    ],
+                  ),
                   borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(16),
-                    topRight: Radius.circular(16),
-                    bottomLeft: Radius.circular(16),
+                    topLeft: Radius.circular(18),
+                    topRight: Radius.circular(18),
+                    bottomLeft: Radius.circular(18),
                     bottomRight: Radius.circular(4),
                   ),
                 ),
@@ -1264,8 +1277,10 @@ class _OptimisticBubble extends StatelessWidget {
                   content,
                   style: const TextStyle(
                     color: Colors.white,
-                    fontSize: 14,
-                    height: 1.35,
+                    fontSize: 14.5,
+                    height: 1.45,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: -0.2,
                   ),
                 ),
               ),

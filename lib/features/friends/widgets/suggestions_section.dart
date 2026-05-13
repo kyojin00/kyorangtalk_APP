@@ -4,28 +4,28 @@ import '../../../shared/widgets/avatar_widget.dart';
 import '../models/friend_model.dart';
 
 // ═══════════════════════════════════════════════
-// 알 수도 있는 친구 섹션
+// ✨ SuggestionsSection — 리디자인 + 메시지 보내기
 //
-// 위치: lib/features/friends/widgets/suggestions_section.dart
-//
-// 특징:
-// - 헤더 탭하면 접기/펼치기 토글
-// - 카드 작음 (아바타 + 닉네임만)
-// - 카드 탭 → 디테일 시트
-// - 화면 초과 시 마지막에 "+N명" 카드
-// - "+N명" 탭 → 전체 모달
-// - 디테일/모달에서 "OOO 외 N명과 친구" 형식만 표시
+// 변경:
+// - 헤더: 그라데이션 아이콘 컨테이너
+// - 미니 카드: NEW 뱃지 그라데이션
+// - 더보기 카드: 그라데이션 보더 + 색상
+// - 디테일 시트: [관심없음] [메시지] [친구추가]
+// - 전체 모달: 각 아이템에 [×] [💬] [친구추가]
 // ═══════════════════════════════════════════════
 
 const _kVisibleLimit = 5;
-const _kCardWidth = 72.0;
-const _kAvatarSize = 50.0;
+const _kCardWidth = 76.0;
+const _kAvatarSize = 54.0;
 
 class SuggestionsSection extends StatefulWidget {
   final List<SuggestedFriend> suggestions;
-  final void Function(SuggestedFriend) onTap;       // 호환성 유지용 (이제 안 씀)
+  final void Function(SuggestedFriend) onTap;
   final void Function(SuggestedFriend) onAdd;
   final void Function(String) onDismiss;
+
+  /// ⭐ 메시지 보내기 콜백 (부모에서 DM 진입 로직 연결)
+  final void Function(SuggestedFriend)? onMessage;
 
   const SuggestionsSection({
     super.key,
@@ -33,10 +33,12 @@ class SuggestionsSection extends StatefulWidget {
     required this.onTap,
     required this.onAdd,
     required this.onDismiss,
+    this.onMessage,
   });
 
   @override
-  State<SuggestionsSection> createState() => _SuggestionsSectionState();
+  State<SuggestionsSection> createState() =>
+      _SuggestionsSectionState();
 }
 
 class _SuggestionsSectionState extends State<SuggestionsSection> {
@@ -51,54 +53,79 @@ class _SuggestionsSectionState extends State<SuggestionsSection> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // ⭐ 클릭 가능한 헤더
-        InkWell(
-          onTap: () => setState(() => _expanded = !_expanded),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 14, 16, 10),
-            child: Row(
-              children: [
-                const Icon(Icons.auto_awesome,
-                    color: AppTheme.primary, size: 14),
-                const SizedBox(width: 6),
-                Text('알 수도 있는 친구',
-                    style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w800,
-                        color: AppTheme.textMain)),
-                const SizedBox(width: 6),
-                Text('${widget.suggestions.length}',
-                    style: const TextStyle(
-                        fontSize: 12,
-                        color: AppTheme.primary,
-                        fontWeight: FontWeight.w700)),
-                const Spacer(),
-                // 펼침/접힘 인디케이터
-                AnimatedRotation(
-                  turns: _expanded ? 0 : -0.25,
-                  duration: const Duration(milliseconds: 200),
-                  child: Icon(
-                    Icons.keyboard_arrow_down_rounded,
-                    color: AppTheme.textSub,
-                    size: 20,
+        // 헤더
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 14, 16, 10),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(5),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          AppTheme.primary.withOpacity(0.22),
+                          AppTheme.primary.withOpacity(0.10),
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                    child: const Icon(Icons.auto_awesome_rounded,
+                        color: AppTheme.primary, size: 12),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 8),
+                  Text('알 수도 있는 친구',
+                      style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          color: AppTheme.textMain,
+                          letterSpacing: -0.3)),
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: AppTheme.primary.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text('${widget.suggestions.length}',
+                        style: const TextStyle(
+                            fontSize: 10,
+                            color: AppTheme.primaryLight,
+                            fontWeight: FontWeight.w800)),
+                  ),
+                  const Spacer(),
+                  AnimatedRotation(
+                    turns: _expanded ? 0 : -0.25,
+                    duration: const Duration(milliseconds: 200),
+                    child: Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      color: AppTheme.textSub,
+                      size: 20,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
 
-        // ⭐ 카드 영역 — 접힘 애니메이션
+        // 카드 영역
         AnimatedSize(
           duration: const Duration(milliseconds: 220),
           curve: Curves.easeOutCubic,
           child: _expanded
               ? SizedBox(
-                  height: 96,
+                  height: 102,
                   child: ListView.builder(
                     scrollDirection: Axis.horizontal,
                     padding: const EdgeInsets.symmetric(horizontal: 14),
-                    itemCount: visible.length + (hasMore ? 1 : 0),
+                    physics: const BouncingScrollPhysics(),
+                    itemCount:
+                        visible.length + (hasMore ? 1 : 0),
                     itemBuilder: (_, i) {
                       if (hasMore && i == visible.length) {
                         return _MoreCard(
@@ -108,6 +135,7 @@ class _SuggestionsSectionState extends State<SuggestionsSection> {
                             suggestions: widget.suggestions,
                             onAdd: widget.onAdd,
                             onDismiss: widget.onDismiss,
+                            onMessage: widget.onMessage,
                           ),
                         );
                       }
@@ -119,6 +147,7 @@ class _SuggestionsSectionState extends State<SuggestionsSection> {
                           suggestion: s,
                           onAdd: widget.onAdd,
                           onDismiss: widget.onDismiss,
+                          onMessage: widget.onMessage,
                         ),
                       );
                     },
@@ -128,7 +157,7 @@ class _SuggestionsSectionState extends State<SuggestionsSection> {
         ),
 
         const SizedBox(height: 8),
-        Divider(color: AppTheme.border, height: 1),
+        Container(height: 0.5, color: AppTheme.border.withOpacity(0.5)),
       ],
     );
   }
@@ -138,6 +167,7 @@ class _SuggestionsSectionState extends State<SuggestionsSection> {
     required SuggestedFriend suggestion,
     required void Function(SuggestedFriend) onAdd,
     required void Function(String) onDismiss,
+    void Function(SuggestedFriend)? onMessage,
   }) {
     showModalBottomSheet(
       context: context,
@@ -152,6 +182,12 @@ class _SuggestionsSectionState extends State<SuggestionsSection> {
           Navigator.pop(context);
           onDismiss(suggestion.userId);
         },
+        onMessage: onMessage == null
+            ? null
+            : () {
+                Navigator.pop(context);
+                onMessage(suggestion);
+              },
       ),
     );
   }
@@ -161,6 +197,7 @@ class _SuggestionsSectionState extends State<SuggestionsSection> {
     required List<SuggestedFriend> suggestions,
     required void Function(SuggestedFriend) onAdd,
     required void Function(String) onDismiss,
+    void Function(SuggestedFriend)? onMessage,
   }) {
     showModalBottomSheet(
       context: context,
@@ -170,13 +207,14 @@ class _SuggestionsSectionState extends State<SuggestionsSection> {
         suggestions: suggestions,
         onAdd: onAdd,
         onDismiss: onDismiss,
+        onMessage: onMessage,
       ),
     );
   }
 }
 
 // ═══════════════════════════════════════════════
-// 작은 카드 — 아바타 + 닉네임
+// 미니 카드
 // ═══════════════════════════════════════════════
 class _MiniCard extends StatelessWidget {
   final SuggestedFriend suggestion;
@@ -198,10 +236,25 @@ class _MiniCard extends StatelessWidget {
             Stack(
               clipBehavior: Clip.none,
               children: [
-                AvatarWidget(
-                  url:  suggestion.avatarUrl,
-                  name: suggestion.nickname,
-                  size: _kAvatarSize,
+                Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    boxShadow: suggestion.isNewUser
+                        ? [
+                            BoxShadow(
+                              color: AppTheme.primary
+                                  .withOpacity(0.3),
+                              blurRadius: 10,
+                              spreadRadius: 0,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: AvatarWidget(
+                    url: suggestion.avatarUrl,
+                    name: suggestion.nickname,
+                    size: _kAvatarSize,
+                  ),
                 ),
                 if (suggestion.isNewUser)
                   Positioned(
@@ -209,33 +262,46 @@ class _MiniCard extends StatelessWidget {
                     right: -2,
                     child: Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 4, vertical: 1),
+                          horizontal: 5, vertical: 1.5),
                       decoration: BoxDecoration(
-                        color: AppTheme.primary,
-                        borderRadius: BorderRadius.circular(6),
+                        gradient: LinearGradient(
+                          colors: [
+                            AppTheme.primary,
+                            AppTheme.primary.withOpacity(0.85),
+                          ],
+                        ),
+                        borderRadius: BorderRadius.circular(7),
                         border: Border.all(
-                            color: AppTheme.bg, width: 1.2),
+                            color: AppTheme.bg, width: 1.5),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppTheme.primary.withOpacity(0.4),
+                            blurRadius: 4,
+                            offset: const Offset(0, 1),
+                          ),
+                        ],
                       ),
                       child: const Text(
                         'NEW',
                         style: TextStyle(
                           color: Colors.white,
-                          fontSize: 6.5,
+                          fontSize: 7,
                           fontWeight: FontWeight.w900,
-                          letterSpacing: 0.2,
+                          letterSpacing: 0.3,
                         ),
                       ),
                     ),
                   ),
               ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 7),
             Text(
               suggestion.nickname,
               style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
                 color: AppTheme.textMain,
+                letterSpacing: -0.2,
               ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
@@ -248,7 +314,7 @@ class _MiniCard extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════
-// +N명 더보기 카드
+// 더보기 카드
 // ═══════════════════════════════════════════════
 class _MoreCard extends StatelessWidget {
   final int count;
@@ -272,29 +338,36 @@ class _MoreCard extends StatelessWidget {
               height: _kAvatarSize,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: AppTheme.bgCard,
-                border: Border.all(color: AppTheme.border, width: 1.2),
+                gradient: LinearGradient(
+                  colors: [
+                    AppTheme.primary.withOpacity(0.18),
+                    AppTheme.primary.withOpacity(0.08),
+                  ],
+                ),
+                border: Border.all(
+                    color: AppTheme.primary.withOpacity(0.3),
+                    width: 1.2),
               ),
               alignment: Alignment.center,
               child: Text(
                 '+$count',
                 style: TextStyle(
                   fontSize: 14,
-                  fontWeight: FontWeight.w800,
-                  color: AppTheme.primary,
+                  fontWeight: FontWeight.w900,
+                  color: AppTheme.primaryLight,
+                  letterSpacing: -0.3,
                 ),
               ),
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 7),
             Text(
               '더보기',
               style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: AppTheme.textSub,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.primaryLight,
+                letterSpacing: -0.2,
               ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
             ),
           ],
         ),
@@ -310,11 +383,13 @@ class _DetailSheet extends StatelessWidget {
   final SuggestedFriend suggestion;
   final VoidCallback onAdd;
   final VoidCallback onDismiss;
+  final VoidCallback? onMessage;
 
   const _DetailSheet({
     required this.suggestion,
     required this.onAdd,
     required this.onDismiss,
+    this.onMessage,
   });
 
   @override
@@ -335,7 +410,7 @@ class _DetailSheet extends StatelessWidget {
               Container(
                 width: 40,
                 height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
+                margin: const EdgeInsets.only(bottom: 18),
                 decoration: BoxDecoration(
                   color: AppTheme.border,
                   borderRadius: BorderRadius.circular(2),
@@ -344,10 +419,22 @@ class _DetailSheet extends StatelessWidget {
               Stack(
                 clipBehavior: Clip.none,
                 children: [
-                  AvatarWidget(
-                    url:  suggestion.avatarUrl,
-                    name: suggestion.nickname,
-                    size: 76,
+                  Container(
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppTheme.primary.withOpacity(0.25),
+                          blurRadius: 16,
+                          spreadRadius: 1,
+                        ),
+                      ],
+                    ),
+                    child: AvatarWidget(
+                      url: suggestion.avatarUrl,
+                      name: suggestion.nickname,
+                      size: 80,
+                    ),
                   ),
                   if (suggestion.isNewUser)
                     Positioned(
@@ -355,18 +442,31 @@ class _DetailSheet extends StatelessWidget {
                       right: 0,
                       child: Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 7, vertical: 2.5),
+                            horizontal: 8, vertical: 3),
                         decoration: BoxDecoration(
-                          color: AppTheme.primary,
-                          borderRadius: BorderRadius.circular(9),
+                          gradient: LinearGradient(
+                            colors: [
+                              AppTheme.primary,
+                              AppTheme.primary.withOpacity(0.85),
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(10),
                           border: Border.all(
-                              color: AppTheme.bgCard, width: 2),
+                              color: AppTheme.bgCard, width: 2.5),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppTheme.primary
+                                  .withOpacity(0.4),
+                              blurRadius: 6,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
                         ),
                         child: const Text(
                           'NEW',
                           style: TextStyle(
                             color: Colors.white,
-                            fontSize: 8.5,
+                            fontSize: 9,
                             fontWeight: FontWeight.w900,
                             letterSpacing: 0.4,
                           ),
@@ -375,23 +475,26 @@ class _DetailSheet extends StatelessWidget {
                     ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 14),
               Text(
                 suggestion.nickname,
                 style: TextStyle(
-                  fontSize: 17,
-                  fontWeight: FontWeight.w800,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
                   color: AppTheme.textMain,
+                  letterSpacing: -0.4,
                 ),
               ),
               if (suggestion.statusMessage != null &&
                   suggestion.statusMessage!.isNotEmpty) ...[
-                const SizedBox(height: 4),
+                const SizedBox(height: 5),
                 Text(
                   suggestion.statusMessage!,
                   style: TextStyle(
                     fontSize: 13,
                     color: AppTheme.textSub,
+                    height: 1.4,
+                    letterSpacing: -0.2,
                   ),
                   textAlign: TextAlign.center,
                   maxLines: 2,
@@ -401,61 +504,152 @@ class _DetailSheet extends StatelessWidget {
               const SizedBox(height: 14),
               if (suggestion.mutualNicknames.isNotEmpty)
                 _MutualText(suggestion: suggestion),
-              const SizedBox(height: 20),
+              const SizedBox(height: 22),
+
+              // 액션 버튼들
               Row(
                 children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: onDismiss,
-                      style: OutlinedButton.styleFrom(
-                        padding:
-                            const EdgeInsets.symmetric(vertical: 12),
-                        side: BorderSide(color: AppTheme.border),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      child: Text(
-                        '관심 없음',
-                        style: TextStyle(
-                          color: AppTheme.textSub,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
+                  // 관심 없음
                   Expanded(
                     flex: 2,
-                    child: ElevatedButton.icon(
-                      onPressed: onAdd,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppTheme.primary,
-                        foregroundColor: Colors.white,
-                        padding:
-                            const EdgeInsets.symmetric(vertical: 12),
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
+                    child: _OutlineButton(
+                      label: '관심 없음',
+                      onTap: onDismiss,
+                    ),
+                  ),
+                  if (onMessage != null) ...[
+                    const SizedBox(width: 8),
+                    // ⭐ 메시지 (cyan)
+                    Expanded(
+                      flex: 2,
+                      child: _GradientActionButton(
+                        icon: Icons.chat_bubble_rounded,
+                        label: '메시지',
+                        colors: const [
+                          Color(0xFF06B6D4),
+                          Color(0xFF0891B2)
+                        ],
+                        shadowColor: const Color(0xFF06B6D4),
+                        onTap: onMessage!,
                       ),
-                      icon: const Icon(
-                        Icons.person_add_alt_1_rounded,
-                        size: 16,
-                      ),
-                      label: const Text(
-                        '친구 추가',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
+                    ),
+                  ],
+                  const SizedBox(width: 8),
+                  // 친구 추가 (primary)
+                  Expanded(
+                    flex: 3,
+                    child: _GradientActionButton(
+                      icon: Icons.person_add_alt_1_rounded,
+                      label: '친구 추가',
+                      colors: [
+                        AppTheme.primary,
+                        AppTheme.primary.withOpacity(0.85),
+                      ],
+                      shadowColor: AppTheme.primary,
+                      onTap: onAdd,
                     ),
                   ),
                 ],
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OutlineButton extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+
+  const _OutlineButton({required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          height: 46,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: AppTheme.bg,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppTheme.border),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: AppTheme.textSub,
+              fontSize: 13.5,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.2,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GradientActionButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final List<Color> colors;
+  final Color shadowColor;
+  final VoidCallback onTap;
+
+  const _GradientActionButton({
+    required this.icon,
+    required this.label,
+    required this.colors,
+    required this.shadowColor,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 46,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: colors,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: shadowColor.withOpacity(0.4),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onTap,
+            child: Center(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, color: Colors.white, size: 15),
+                  const SizedBox(width: 5),
+                  Text(label,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.2)),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -476,15 +670,23 @@ class _MutualText extends StatelessWidget {
         rest > 0 ? '$first 외 $rest명과 친구' : '$first 님과 친구';
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding:
+          const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: AppTheme.bg,
+        gradient: LinearGradient(
+          colors: [
+            AppTheme.primary.withOpacity(0.10),
+            AppTheme.primary.withOpacity(0.04),
+          ],
+        ),
         borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+            color: AppTheme.primary.withOpacity(0.2), width: 0.6),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.people_outline,
+          Icon(Icons.people_alt_rounded,
               color: AppTheme.primary, size: 13),
           const SizedBox(width: 6),
           Flexible(
@@ -493,7 +695,8 @@ class _MutualText extends StatelessWidget {
               style: TextStyle(
                 fontSize: 12,
                 color: AppTheme.textMain,
-                fontWeight: FontWeight.w500,
+                fontWeight: FontWeight.w600,
+                letterSpacing: -0.2,
               ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
@@ -506,17 +709,19 @@ class _MutualText extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════
-// 전체 보기 모달
+// 전체 모달
 // ═══════════════════════════════════════════════
 class _AllSuggestionsSheet extends StatefulWidget {
   final List<SuggestedFriend> suggestions;
   final void Function(SuggestedFriend) onAdd;
   final void Function(String) onDismiss;
+  final void Function(SuggestedFriend)? onMessage;
 
   const _AllSuggestionsSheet({
     required this.suggestions,
     required this.onAdd,
     required this.onDismiss,
+    this.onMessage,
   });
 
   @override
@@ -524,7 +729,8 @@ class _AllSuggestionsSheet extends StatefulWidget {
       _AllSuggestionsSheetState();
 }
 
-class _AllSuggestionsSheetState extends State<_AllSuggestionsSheet> {
+class _AllSuggestionsSheetState
+    extends State<_AllSuggestionsSheet> {
   late List<SuggestedFriend> _items;
   final Set<String> _added = {};
 
@@ -559,40 +765,66 @@ class _AllSuggestionsSheetState extends State<_AllSuggestionsSheet> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 14),
               child: Row(
                 children: [
-                  const Icon(Icons.auto_awesome,
-                      color: AppTheme.primary, size: 16),
-                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.all(7),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          AppTheme.primary.withOpacity(0.25),
+                          AppTheme.primary.withOpacity(0.12),
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.auto_awesome_rounded,
+                        color: AppTheme.primary, size: 15),
+                  ),
+                  const SizedBox(width: 10),
                   Text(
                     '알 수도 있는 친구',
                     style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
                       color: AppTheme.textMain,
+                      letterSpacing: -0.3,
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  Text(
-                    '${_items.length}',
-                    style: const TextStyle(
-                      fontSize: 13,
-                      color: AppTheme.primary,
-                      fontWeight: FontWeight.w700,
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: AppTheme.primary.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '${_items.length}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppTheme.primaryLight,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
-            Divider(color: AppTheme.border, height: 1),
+            Container(
+                height: 0.5,
+                color: AppTheme.border.withOpacity(0.5)),
             Expanded(
               child: ListView.separated(
                 controller: scrollController,
-                padding: const EdgeInsets.symmetric(vertical: 8),
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                physics: const BouncingScrollPhysics(),
                 itemCount: _items.length,
-                separatorBuilder: (_, __) => Divider(
-                    color: AppTheme.border, height: 1, indent: 68),
+                separatorBuilder: (_, __) => Container(
+                    height: 0.5,
+                    color: AppTheme.border.withOpacity(0.4),
+                    margin: const EdgeInsets.only(left: 70)),
                 itemBuilder: (_, i) {
                   final s = _items[i];
                   final isAdded = _added.contains(s.userId);
@@ -606,9 +838,13 @@ class _AllSuggestionsSheetState extends State<_AllSuggestionsSheet> {
                     onDismiss: () {
                       widget.onDismiss(s.userId);
                       setState(() {
-                        _items.removeWhere((x) => x.userId == s.userId);
+                        _items.removeWhere(
+                            (x) => x.userId == s.userId);
                       });
                     },
+                    onMessage: widget.onMessage == null
+                        ? null
+                        : () => widget.onMessage!(s),
                   );
                 },
               ),
@@ -625,12 +861,14 @@ class _AllListTile extends StatelessWidget {
   final bool isAdded;
   final VoidCallback onAdd;
   final VoidCallback onDismiss;
+  final VoidCallback? onMessage;
 
   const _AllListTile({
     required this.suggestion,
     required this.isAdded,
     required this.onAdd,
     required this.onDismiss,
+    this.onMessage,
   });
 
   @override
@@ -645,16 +883,30 @@ class _AllListTile extends StatelessWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(
+          horizontal: 16, vertical: 10),
       child: Row(
         children: [
           Stack(
             clipBehavior: Clip.none,
             children: [
-              AvatarWidget(
-                url:  suggestion.avatarUrl,
-                name: suggestion.nickname,
-                size: 40,
+              Container(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  boxShadow: suggestion.isNewUser
+                      ? [
+                          BoxShadow(
+                            color: AppTheme.primary.withOpacity(0.3),
+                            blurRadius: 8,
+                          ),
+                        ]
+                      : null,
+                ),
+                child: AvatarWidget(
+                  url: suggestion.avatarUrl,
+                  name: suggestion.nickname,
+                  size: 42,
+                ),
               ),
               if (suggestion.isNewUser)
                 Positioned(
@@ -662,9 +914,14 @@ class _AllListTile extends StatelessWidget {
                   right: -2,
                   child: Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 3.5, vertical: 1),
+                        horizontal: 4, vertical: 1),
                     decoration: BoxDecoration(
-                      color: AppTheme.primary,
+                      gradient: LinearGradient(
+                        colors: [
+                          AppTheme.primary,
+                          AppTheme.primary.withOpacity(0.85),
+                        ],
+                      ),
                       borderRadius: BorderRadius.circular(5),
                       border: Border.all(
                           color: AppTheme.bgCard, width: 1.2),
@@ -690,8 +947,9 @@ class _AllListTile extends StatelessWidget {
                   suggestion.nickname,
                   style: TextStyle(
                     fontSize: 14,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w800,
                     color: AppTheme.textMain,
+                    letterSpacing: -0.2,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -703,6 +961,7 @@ class _AllListTile extends StatelessWidget {
                     style: TextStyle(
                       fontSize: 11.5,
                       color: AppTheme.textSub,
+                      letterSpacing: -0.2,
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -711,38 +970,139 @@ class _AllListTile extends StatelessWidget {
               ],
             ),
           ),
-          IconButton(
-            onPressed: onDismiss,
-            icon: Icon(Icons.close,
-                color: AppTheme.textSub, size: 16),
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-            padding: EdgeInsets.zero,
+          // 닫기
+          _RoundIconButton(
+            icon: Icons.close_rounded,
+            color: AppTheme.textSub,
+            bgColor: AppTheme.bg,
+            onTap: onDismiss,
           ),
-          const SizedBox(width: 2),
-          ElevatedButton(
-            onPressed: isAdded ? null : onAdd,
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppTheme.primary,
-              foregroundColor: Colors.white,
-              disabledBackgroundColor: AppTheme.bg,
-              disabledForegroundColor: AppTheme.textSub,
-              elevation: 0,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 10, vertical: 4),
-              minimumSize: const Size(0, 28),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
+          if (onMessage != null) ...[
+            const SizedBox(width: 4),
+            // ⭐ 메시지 (cyan)
+            _RoundIconButton(
+              icon: Icons.chat_bubble_rounded,
+              color: Colors.white,
+              gradient: const LinearGradient(
+                colors: [Color(0xFF06B6D4), Color(0xFF0891B2)],
               ),
+              shadowColor: const Color(0xFF06B6D4),
+              onTap: onMessage!,
             ),
-            child: Text(
-              isAdded ? '요청됨' : '친구 추가',
-              style: const TextStyle(
-                fontSize: 11.5,
-                fontWeight: FontWeight.w700,
+          ],
+          const SizedBox(width: 4),
+          // 친구 추가 (primary 작은 버튼)
+          Container(
+            height: 30,
+            decoration: BoxDecoration(
+              gradient: isAdded
+                  ? null
+                  : LinearGradient(
+                      colors: [
+                        AppTheme.primary,
+                        AppTheme.primary.withOpacity(0.85),
+                      ],
+                    ),
+              color: isAdded ? AppTheme.bg : null,
+              borderRadius: BorderRadius.circular(9),
+              border: isAdded
+                  ? Border.all(color: AppTheme.border)
+                  : null,
+              boxShadow: isAdded
+                  ? null
+                  : [
+                      BoxShadow(
+                        color: AppTheme.primary.withOpacity(0.35),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(9),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: isAdded ? null : onAdd,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 11),
+                    child: Center(
+                      child: Text(
+                        isAdded ? '요청됨' : '추가',
+                        style: TextStyle(
+                          color: isAdded
+                              ? AppTheme.textSub
+                              : Colors.white,
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.2,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 작은 원형 아이콘 버튼
+// ═══════════════════════════════════════════════
+class _RoundIconButton extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final Color? bgColor;
+  final Gradient? gradient;
+  final Color? shadowColor;
+  final VoidCallback onTap;
+
+  const _RoundIconButton({
+    required this.icon,
+    required this.color,
+    required this.onTap,
+    this.bgColor,
+    this.gradient,
+    this.shadowColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 30,
+      height: 30,
+      decoration: BoxDecoration(
+        gradient: gradient,
+        color: gradient == null ? bgColor : null,
+        shape: BoxShape.circle,
+        border: gradient == null
+            ? Border.all(color: AppTheme.border)
+            : null,
+        boxShadow: shadowColor != null
+            ? [
+                BoxShadow(
+                  color: shadowColor!.withOpacity(0.35),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ]
+            : null,
+      ),
+      child: ClipOval(
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onTap,
+            child: Center(
+              child: Icon(icon, color: color, size: 14),
+            ),
+          ),
+        ),
       ),
     );
   }

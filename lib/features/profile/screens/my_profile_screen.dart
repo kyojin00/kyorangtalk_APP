@@ -8,16 +8,19 @@ import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
+import '../sheets/photo_visibility_sheet.dart';
+import '../widgets/profile_gallery_section.dart';
+import 'photo_viewer_screen.dart';
 import 'sub_profiles_screen.dart';
 
 // ═══════════════════════════════════════════════════
-// MyProfileScreen — 시네마틱 + 원본 화질 배경
+// MyProfileScreen — 갤러리 통합
 //
-// 해상도 개선:
-// - 배경: file_picker로 원본 파일 직접 업로드 (압축 X)
-// - cacheWidth/Height = 디바이스 픽셀 비율 (다운샘플링 X)
-// - filterQuality: high
-// - 오버레이 투명도 대폭 감소 (배경 선명하게)
+// 변경:
+// - 이전 프로필 사진 섹션 제거 ✂
+// - 갤러리 ↔ 프로필 사진 양방향 연동:
+//   • 프로필 사진 변경 → 자동으로 갤러리에도 추가
+//   • 갤러리 사진 → 풀스크린 ⋯ → 프로필 사진으로 설정
 // ═══════════════════════════════════════════════════
 
 class MyProfileScreen extends ConsumerStatefulWidget {
@@ -31,8 +34,8 @@ class MyProfileScreen extends ConsumerStatefulWidget {
 class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
   final _myId = Supabase.instance.client.auth.currentUser!.id;
   Map<String, dynamic>? _profile;
-  List<Map<String, dynamic>> _avatarHistory = [];
   List<Map<String, dynamic>> _stickers = [];
+  List<Map<String, dynamic>> _photos = [];
   int _subProfilesCount = 0;
   bool _loading = true;
   bool _editing = false;
@@ -60,9 +63,9 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
   Future<void> _loadData() async {
     await Future.wait([
       _loadProfile(),
-      _loadAvatarHistory(),
       _loadStickers(),
       _loadSubProfilesCount(),
+      _loadPhotos(),
     ]);
     if (mounted) setState(() => _loading = false);
   }
@@ -83,16 +86,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     }
   }
 
-  Future<void> _loadAvatarHistory() async {
-    final data = await Supabase.instance.client
-        .from('kyorangtalk_avatar_history')
-        .select('*')
-        .eq('user_id', _myId)
-        .order('created_at', ascending: false)
-        .limit(20);
-    if (mounted) setState(() => _avatarHistory = List.from(data));
-  }
-
   Future<void> _loadStickers() async {
     final data = await Supabase.instance.client
         .from('kyorangtalk_profile_stickers')
@@ -110,6 +103,17 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
       setState(() => _subProfilesCount = data.length);
     }
   }
+
+  Future<void> _loadPhotos() async {
+  final data = await Supabase.instance.client
+      .from('kyorangtalk_profile_photos')
+      .select('id, photo_url, visibility, position, created_at')
+      .eq('user_id', _myId)
+      .order('created_at', ascending: false);  // ⭐ 최신이 앞으로
+  if (mounted) {
+    setState(() => _photos = List<Map<String, dynamic>>.from(data));
+  }
+}
 
   void _showSnack(String msg) {
     if (!mounted) return;
@@ -131,8 +135,23 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     });
   }
 
+  String _getContentType(String ext) {
+    switch (ext) {
+      case 'png':
+        return 'image/png';
+      case 'webp':
+        return 'image/webp';
+      case 'gif':
+        return 'image/gif';
+      case 'heic':
+        return 'image/heic';
+      default:
+        return 'image/jpeg';
+    }
+  }
+
   // ═══════════════════════════════════════════════════
-  // 아바타 — image_picker 사용 (작아도 됨)
+  // ⭐ 아바타 변경 — 갤러리에도 자동 추가
   // ═══════════════════════════════════════════════════
   Future<void> _changeAvatar() async {
     final picker = ImagePicker();
@@ -164,41 +183,37 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
             ),
           );
 
-      final url = supabase.storage
-          .from('kyorangtalk')
-          .getPublicUrl(path);
+      final url =
+          supabase.storage.from('kyorangtalk').getPublicUrl(path);
 
+      // 프로필 사진 업데이트
       await supabase
           .from('kyorangtalk_profiles')
           .update({'avatar_url': url})
           .eq('id', _myId);
 
-      await supabase.from('kyorangtalk_avatar_history').insert({
+      // ⭐ 갤러리에도 추가 (friends 기본)
+      final maxPos = _photos.isEmpty
+          ? 0
+          : (_photos
+                  .map((p) => (p['position'] as int?) ?? 0)
+                  .reduce((a, b) => a > b ? a : b)) +
+              1;
+
+      await supabase.from('kyorangtalk_profile_photos').insert({
         'user_id': _myId,
-        'avatar_url': url,
+        'photo_url': url,
+        'visibility': 'friends',
+        'position': maxPos,
       });
 
-      await _loadData();
+      await _loadProfile();
+      await _loadPhotos();
       _showSnack('프로필 사진이 변경됐어요!');
     } catch (e) {
       _showSnack('사진 업로드 실패: $e');
     } finally {
       if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  String _getContentType(String ext) {
-    switch (ext) {
-      case 'png':
-        return 'image/png';
-      case 'webp':
-        return 'image/webp';
-      case 'gif':
-        return 'image/gif';
-      case 'heic':
-        return 'image/heic';
-      default:
-        return 'image/jpeg';
     }
   }
 
@@ -233,8 +248,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                   color: AppTheme.textMain),
               title: Text('갤러리에서 선택',
                   style: TextStyle(color: AppTheme.textMain)),
-              onTap: () =>
-                  Navigator.pop(context, ImageSource.gallery),
+              onTap: () => Navigator.pop(context, ImageSource.gallery),
             ),
             const SizedBox(height: 8),
           ],
@@ -244,7 +258,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
   }
 
   // ═══════════════════════════════════════════════════
-  // ⭐ 배경 — file_picker로 원본 파일 (압축 X)
+  // 배경 변경
   // ═══════════════════════════════════════════════════
   Future<void> _changeBackground() async {
     final action = await showModalBottomSheet<String>(
@@ -337,7 +351,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     String ext = 'jpg';
 
     if (action == 'camera') {
-      // 카메라는 image_picker (file_picker는 카메라 미지원)
       final picker = ImagePicker();
       final picked = await picker.pickImage(
         source: ImageSource.camera,
@@ -347,11 +360,10 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
       file = File(picked.path);
       ext = picked.path.split('.').last.toLowerCase();
     } else {
-      // ⭐ 갤러리는 file_picker — 원본 파일 그대로
       final result = await FilePicker.platform.pickFiles(
         type: FileType.image,
         allowMultiple: false,
-        withData: false, // 메모리에 안 올리고 파일 경로만
+        withData: false,
       );
       if (result == null || result.files.isEmpty) return;
       final filePath = result.files.first.path;
@@ -366,12 +378,9 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
       final path =
           'backgrounds/$_myId/${DateTime.now().millisecondsSinceEpoch}.$ext';
 
-      // 파일 크기 로그
       final sizeBytes = await file.length();
       final sizeMB = sizeBytes / 1024 / 1024;
-      print('📸 배경 이미지 원본 크기: ${sizeMB.toStringAsFixed(2)} MB');
 
-      // 50MB 초과 시 경고
       if (sizeMB > 50) {
         _showSnack('파일이 너무 커요 (${sizeMB.toStringAsFixed(1)}MB)');
         setState(() => _saving = false);
@@ -388,16 +397,14 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
             ),
           );
 
-      final url = supabase.storage
-          .from('kyorangtalk')
-          .getPublicUrl(path);
+      final url =
+          supabase.storage.from('kyorangtalk').getPublicUrl(path);
 
       await supabase
           .from('kyorangtalk_profiles')
           .update({'background_url': url})
           .eq('id', _myId);
 
-      // 이미지 캐시 비우기
       imageCache.clear();
       imageCache.clearLiveImages();
 
@@ -410,6 +417,138 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     }
   }
 
+  // ═══════════════════════════════════════════════════
+  // 갤러리 사진 추가
+  // ═══════════════════════════════════════════════════
+  Future<void> _addGalleryPhoto() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: false,
+      withData: false,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final filePath = result.files.first.path;
+    if (filePath == null) return;
+
+    final file = File(filePath);
+    final ext = filePath.split('.').last.toLowerCase();
+
+    setState(() => _saving = true);
+    try {
+      final supabase = Supabase.instance.client;
+
+      final sizeBytes = await file.length();
+      final sizeMB = sizeBytes / 1024 / 1024;
+      if (sizeMB > 50) {
+        _showSnack('파일이 너무 커요 (${sizeMB.toStringAsFixed(1)}MB)');
+        setState(() => _saving = false);
+        return;
+      }
+
+      final path =
+          'profile-photos/$_myId/${DateTime.now().millisecondsSinceEpoch}.$ext';
+
+      await supabase.storage.from('kyorangtalk').upload(
+            path,
+            file,
+            fileOptions: FileOptions(
+              upsert: true,
+              contentType: _getContentType(ext),
+              cacheControl: '3600',
+            ),
+          );
+
+      final url =
+          supabase.storage.from('kyorangtalk').getPublicUrl(path);
+
+      final maxPos = _photos.isEmpty
+          ? 0
+          : (_photos
+                  .map((p) => (p['position'] as int?) ?? 0)
+                  .reduce((a, b) => a > b ? a : b)) +
+              1;
+
+      await supabase.from('kyorangtalk_profile_photos').insert({
+        'user_id': _myId,
+        'photo_url': url,
+        'visibility': 'friends',
+        'position': maxPos,
+      });
+
+      await _loadPhotos();
+      _showSnack('사진이 추가됐어요!');
+    } catch (e) {
+      _showSnack('업로드 실패: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _deleteGalleryPhoto(int index) async {
+    if (index < 0 || index >= _photos.length) return;
+    final photo = _photos[index];
+    final id = photo['id'] as String;
+
+    try {
+      await Supabase.instance.client
+          .from('kyorangtalk_profile_photos')
+          .delete()
+          .eq('id', id);
+      await _loadPhotos();
+      _showSnack('사진이 삭제됐어요');
+    } catch (e) {
+      _showSnack('삭제 실패: $e');
+    }
+  }
+
+  Future<void> _changePhotoVisibility(int index) async {
+    if (index < 0 || index >= _photos.length) return;
+    final photo = _photos[index];
+    final id = photo['id'] as String;
+    final currentVis = photo['visibility'] as String? ?? 'friends';
+
+    final result = await showPhotoVisibilitySheet(
+      context: context,
+      photoId: id,
+      currentVisibility: currentVis,
+      myId: _myId,
+    );
+
+    if (result != null) {
+      await _loadPhotos();
+      _showSnack('공개 범위가 변경됐어요');
+    }
+  }
+
+  // ⭐ 갤러리 사진을 프로필 사진으로 설정
+  Future<void> _setPhotoAsAvatar(int index) async {
+    if (index < 0 || index >= _photos.length) return;
+    final photo = _photos[index];
+    final url = photo['photo_url'] as String;
+
+    setState(() => _saving = true);
+    try {
+      await Supabase.instance.client
+          .from('kyorangtalk_profiles')
+          .update({'avatar_url': url})
+          .eq('id', _myId);
+
+      // 이미지 캐시 비우기
+      imageCache.clear();
+      imageCache.clearLiveImages();
+
+      await _loadProfile();
+      _showSnack('프로필 사진으로 설정됐어요!');
+    } catch (e) {
+      _showSnack('설정 실패: $e');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════
+  // 스티커
+  // ═══════════════════════════════════════════════════
   Future<void> _addSticker() async {
     if (_stickers.length >= 10) {
       _showSnack('스티커는 최대 10개까지 추가할 수 있어요');
@@ -552,8 +691,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                 Container(
                   width: 40,
                   height: 4,
-                  margin:
-                      const EdgeInsets.symmetric(vertical: 12),
+                  margin: const EdgeInsets.symmetric(vertical: 12),
                   decoration: BoxDecoration(
                       color: AppTheme.border,
                       borderRadius: BorderRadius.circular(2)),
@@ -575,8 +713,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 20),
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: Row(
                     children: [
                       Text('크기',
@@ -659,7 +796,13 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
-        pageBuilder: (_, __, ___) => _FullscreenImageViewer(url: url),
+        pageBuilder: (_, __, ___) => PhotoViewerScreen(
+          imageUrls: [url],
+          initialIndex: 0,
+          isOwner: false,
+        ),
+        transitionsBuilder: (_, animation, __, child) =>
+            FadeTransition(opacity: animation, child: child),
       ),
     );
   }
@@ -668,7 +811,13 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
-        pageBuilder: (_, __, ___) => _FullscreenImageViewer(url: url),
+        pageBuilder: (_, __, ___) => PhotoViewerScreen(
+          imageUrls: [url],
+          initialIndex: 0,
+          isOwner: false,
+        ),
+        transitionsBuilder: (_, animation, __, child) =>
+            FadeTransition(opacity: animation, child: child),
       ),
     );
   }
@@ -691,16 +840,9 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     final background = _profile?['background_url'] as String?;
     final statusMessage = _profile?['status_message'] as String?;
 
-    final List<Map<String, dynamic>> pastAvatars = [];
-    if (_avatarHistory.length > 1) {
-      pastAvatars.addAll(_avatarHistory.sublist(1));
-    }
-
     final screenWidth = MediaQuery.of(context).size.width;
     final screenHeight = MediaQuery.of(context).size.height;
-    final thumbSize = (screenWidth - 40 - 30) / 4;
 
-    // ⭐ 디바이스 픽셀 비율로 캐싱 (다운샘플링 방지)
     final pixelRatio = MediaQuery.of(context).devicePixelRatio;
     final bgCacheWidth = (screenWidth * pixelRatio).round();
     final bgCacheHeight = (screenHeight * pixelRatio).round();
@@ -710,11 +852,9 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
       resizeToAvoidBottomInset: _editing,
       body: _loading
           ? const Center(
-              child:
-                  CircularProgressIndicator(color: AppTheme.primary))
+              child: CircularProgressIndicator(color: AppTheme.primary))
           : Stack(
               children: [
-                // ⭐ 배경 — 고해상도 캐싱 + 탭 가능
                 Positioned.fill(
                   child: GestureDetector(
                     onTap: (background != null &&
@@ -737,7 +877,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                   ),
                 ),
 
-                // ⭐ 오버레이 — 훨씬 약하게
                 IgnorePointer(
                   child: Positioned.fill(
                     child: Container(
@@ -758,7 +897,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                   ),
                 ),
 
-                // 편집 모드 backdrop
                 AnimatedSwitcher(
                   duration: const Duration(milliseconds: 250),
                   child: _editing
@@ -813,8 +951,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                           avatar: avatar,
                           nickname: nickname,
                           statusMessage: statusMessage,
-                          pastAvatars: pastAvatars,
-                          thumbSize: thumbSize,
                         ),
                 ),
               ],
@@ -826,361 +962,288 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     required String? avatar,
     required String nickname,
     required String? statusMessage,
-    required List<Map<String, dynamic>> pastAvatars,
-    required double thumbSize,
   }) {
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-          child: Row(
-            children: [
-              _GlassIconButton(
-                icon: Icons.close_rounded,
-                onTap: _stickerMode
-                    ? () => setState(() => _stickerMode = false)
-                    : () => Navigator.pop(context),
-              ),
-              const Spacer(),
-              if (_stickerMode) ...[
+    return SingleChildScrollView(
+      physics: const BouncingScrollPhysics(),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: Row(
+              children: [
                 _GlassIconButton(
-                  icon: Icons.add_reaction_outlined,
-                  onTap: _saving ? () {} : _addSticker,
+                  icon: Icons.close_rounded,
+                  onTap: _stickerMode
+                      ? () => setState(() => _stickerMode = false)
+                      : () => Navigator.pop(context),
                 ),
-                const SizedBox(width: 8),
-                _GlassTextButton(
-                  label: '완료',
-                  onTap: () => setState(() => _stickerMode = false),
-                ),
-              ] else ...[
-                _MultiProfileButton(
-                  count: _subProfilesCount,
-                  onTap: () async {
-                    await Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const SubProfilesScreen(),
-                      ),
-                    );
-                    _loadSubProfilesCount();
-                  },
-                ),
-                const SizedBox(width: 8),
-                _GlassIconButton(
-                  icon: Icons.emoji_emotions_outlined,
-                  onTap: () => setState(() => _stickerMode = true),
-                ),
-                const SizedBox(width: 8),
-                _GlassIconButton(
-                  icon: Icons.wallpaper_rounded,
-                  onTap: _saving ? () {} : _changeBackground,
-                ),
-                const SizedBox(width: 8),
-                _GlassIconButton(
-                  icon: Icons.edit_rounded,
-                  onTap: () => setState(() => _editing = true),
-                ),
+                const Spacer(),
+                if (_stickerMode) ...[
+                  _GlassIconButton(
+                    icon: Icons.add_reaction_outlined,
+                    onTap: _saving ? () {} : _addSticker,
+                  ),
+                  const SizedBox(width: 8),
+                  _GlassTextButton(
+                    label: '완료',
+                    onTap: () => setState(() => _stickerMode = false),
+                  ),
+                ] else ...[
+                  _MultiProfileButton(
+                    count: _subProfilesCount,
+                    onTap: () async {
+                      await Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const SubProfilesScreen(),
+                        ),
+                      );
+                      _loadSubProfilesCount();
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                  _GlassIconButton(
+                    icon: Icons.emoji_emotions_outlined,
+                    onTap: () => setState(() => _stickerMode = true),
+                  ),
+                  const SizedBox(width: 8),
+                  _GlassIconButton(
+                    icon: Icons.wallpaper_rounded,
+                    onTap: _saving ? () {} : _changeBackground,
+                  ),
+                  const SizedBox(width: 8),
+                  _GlassIconButton(
+                    icon: Icons.edit_rounded,
+                    onTap: () => setState(() => _editing = true),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
-        ),
 
-        const Spacer(flex: 2),
+          SizedBox(
+              height: MediaQuery.of(context).size.height * 0.18),
 
-        if (!_stickerMode)
-          Stack(
-            children: [
-              Container(
-                width: 124,
-                height: 124,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppTheme.primary.withOpacity(0.4),
-                      blurRadius: 40,
-                      spreadRadius: 4,
-                    ),
-                    BoxShadow(
-                      color: AppTheme.primaryLight.withOpacity(0.3),
-                      blurRadius: 60,
-                      spreadRadius: 8,
-                    ),
-                  ],
-                ),
-              ),
-              GestureDetector(
-                onTap: avatar != null
-                    ? () => _showAvatarFullscreen(avatar)
-                    : null,
-                child: Container(
+          if (!_stickerMode)
+            Stack(
+              children: [
+                Container(
                   width: 124,
                   height: 124,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        AppTheme.primaryLight,
-                        AppTheme.primary,
-                      ],
-                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppTheme.primary.withOpacity(0.4),
+                        blurRadius: 40,
+                        spreadRadius: 4,
+                      ),
+                      BoxShadow(
+                        color: AppTheme.primaryLight.withOpacity(0.3),
+                        blurRadius: 60,
+                        spreadRadius: 8,
+                      ),
+                    ],
                   ),
-                  padding: const EdgeInsets.all(3),
-                  child: ClipOval(
-                    child: Container(
-                      color: AppTheme.bg,
-                      padding: const EdgeInsets.all(2),
-                      child: ClipOval(
-                        child: AvatarWidget(
-                          url: avatar,
-                          name: nickname,
-                          size: 114,
+                ),
+                GestureDetector(
+                  onTap: avatar != null
+                      ? () => _showAvatarFullscreen(avatar)
+                      : null,
+                  child: Container(
+                    width: 124,
+                    height: 124,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          AppTheme.primaryLight,
+                          AppTheme.primary,
+                        ],
+                      ),
+                    ),
+                    padding: const EdgeInsets.all(3),
+                    child: ClipOval(
+                      child: Container(
+                        color: AppTheme.bg,
+                        padding: const EdgeInsets.all(2),
+                        child: ClipOval(
+                          child: AvatarWidget(
+                            url: avatar,
+                            name: nickname,
+                            size: 114,
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
-              ),
-              Positioned(
-                bottom: 0,
-                right: 0,
-                child: GestureDetector(
-                  onTap: _saving ? null : _changeAvatar,
-                  child: Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          AppTheme.primary,
-                          AppTheme.primary.withOpacity(0.85),
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: GestureDetector(
+                    onTap: _saving ? null : _changeAvatar,
+                    child: Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            AppTheme.primary,
+                            AppTheme.primary.withOpacity(0.85),
+                          ],
+                        ),
+                        shape: BoxShape.circle,
+                        border:
+                            Border.all(color: AppTheme.bg, width: 3),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppTheme.primary.withOpacity(0.4),
+                            blurRadius: 10,
+                            offset: const Offset(0, 3),
+                          ),
                         ],
                       ),
-                      shape: BoxShape.circle,
-                      border:
-                          Border.all(color: AppTheme.bg, width: 3),
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppTheme.primary.withOpacity(0.4),
-                          blurRadius: 10,
-                          offset: const Offset(0, 3),
-                        ),
-                      ],
+                      child: _saving
+                          ? const Padding(
+                              padding: EdgeInsets.all(8),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.white),
+                            )
+                          : const Icon(Icons.camera_alt_rounded,
+                              color: Colors.white, size: 16),
                     ),
-                    child: _saving
-                        ? const Padding(
-                            padding: EdgeInsets.all(8),
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: Colors.white),
-                          )
-                        : const Icon(Icons.camera_alt_rounded,
-                            color: Colors.white, size: 16),
+                  ),
+                ),
+              ],
+            ),
+
+          if (!_stickerMode) ...[
+            const SizedBox(height: 20),
+            ShaderMask(
+              shaderCallback: (bounds) => LinearGradient(
+                colors: [
+                  Colors.white,
+                  Colors.white.withOpacity(0.85),
+                ],
+              ).createShader(bounds),
+              child: Text(
+                nickname,
+                style: TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.w900,
+                  color: Colors.white,
+                  letterSpacing: -0.5,
+                  shadows: [
+                    Shadow(
+                      color: Colors.black.withOpacity(0.6),
+                      blurRadius: 12,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (statusMessage != null && statusMessage.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 36),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(14),
+                  child: BackdropFilter(
+                    filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.15),
+                        ),
+                      ),
+                      child: Text(
+                        statusMessage,
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Colors.white.withOpacity(0.95),
+                          fontWeight: FontWeight.w500,
+                          height: 1.4,
+                        ),
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                   ),
                 ),
               ),
             ],
-          ),
+            const SizedBox(height: 32),
+          ],
 
-        if (!_stickerMode) ...[
-          const SizedBox(height: 20),
-          ShaderMask(
-            shaderCallback: (bounds) => LinearGradient(
-              colors: [
-                Colors.white,
-                Colors.white.withOpacity(0.85),
-              ],
-            ).createShader(bounds),
-            child: Text(
-              nickname,
-              style: TextStyle(
-                fontSize: 26,
-                fontWeight: FontWeight.w900,
-                color: Colors.white,
-                letterSpacing: -0.5,
-                shadows: [
-                  Shadow(
-                    color: Colors.black.withOpacity(0.6),
-                    blurRadius: 12,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (statusMessage != null && statusMessage.isNotEmpty) ...[
-            const SizedBox(height: 14),
+          if (_stickerMode)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 36),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 20, vertical: 12),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(14),
                 child: BackdropFilter(
-                  filter:
-                      ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
+                    padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.1),
+                      color: Colors.black.withOpacity(0.4),
                       borderRadius: BorderRadius.circular(14),
                       border: Border.all(
                         color: Colors.white.withOpacity(0.15),
                       ),
                     ),
-                    child: Text(
-                      statusMessage,
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.white.withOpacity(0.95),
-                        fontWeight: FontWeight.w500,
-                        height: 1.4,
-                      ),
-                      textAlign: TextAlign.center,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ],
-
-        const Spacer(flex: 3),
-
-        if (_stickerMode)
-          Padding(
-            padding: const EdgeInsets.symmetric(
-                horizontal: 20, vertical: 12),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(14),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                child: Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.4),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: Colors.white.withOpacity(0.15),
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(6),
-                        decoration: BoxDecoration(
-                          color: AppTheme.primary.withOpacity(0.3),
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(Icons.touch_app_rounded,
-                            color: Colors.white, size: 14),
-                      ),
-                      const SizedBox(width: 10),
-                      const Expanded(
-                        child: Text(
-                          '스티커를 드래그해서 이동, 탭해서 편집하세요',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            color: AppTheme.primary.withOpacity(0.3),
+                            shape: BoxShape.circle,
                           ),
+                          child: const Icon(Icons.touch_app_rounded,
+                              color: Colors.white, size: 14),
                         ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-
-        if (!_stickerMode && pastAvatars.isNotEmpty) ...[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(4),
-                  decoration: BoxDecoration(
-                    color: AppTheme.bgCard,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(Icons.history_rounded,
-                      color: AppTheme.textSub, size: 13),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  '이전 프로필 사진',
-                  style: TextStyle(
-                      fontSize: 13,
-                      color: AppTheme.textMain,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.2),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  '${pastAvatars.length}',
-                  style: TextStyle(
-                      fontSize: 13,
-                      color: AppTheme.textSub,
-                      fontWeight: FontWeight.w700),
-                ),
-              ],
-            ),
-          ),
-          SizedBox(
-            height: thumbSize,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              physics: const BouncingScrollPhysics(),
-              itemCount: pastAvatars.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 10),
-              itemBuilder: (_, i) {
-                final item = pastAvatars[i];
-                final url = item['avatar_url'] as String;
-                return GestureDetector(
-                  onTap: () => _showAvatarFullscreen(url),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(14),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.3),
-                          blurRadius: 8,
-                          offset: const Offset(0, 3),
+                        const SizedBox(width: 10),
+                        const Expanded(
+                          child: Text(
+                            '스티커를 드래그해서 이동, 탭해서 편집하세요',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                         ),
                       ],
                     ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(14),
-                      child: Image.network(
-                        url,
-                        width: thumbSize,
-                        height: thumbSize,
-                        fit: BoxFit.cover,
-                        filterQuality: FilterQuality.high,
-                        errorBuilder: (_, __, ___) => Container(
-                          width: thumbSize,
-                          height: thumbSize,
-                          color: AppTheme.border,
-                          child: Icon(
-                            Icons.broken_image_outlined,
-                            color: AppTheme.textSub,
-                          ),
-                        ),
-                      ),
-                    ),
                   ),
-                );
-              },
+                ),
+              ),
             ),
-          ),
-        ],
 
-        const SizedBox(height: 24),
-      ],
+          // ⭐ 갤러리 섹션 (이전 프로필 사진은 제거됨)
+          if (!_stickerMode) ...[
+            ProfileGallerySection(
+              photos: _photos,
+              isOwner: true,
+              onAddPhoto: _saving ? null : _addGalleryPhoto,
+              onDelete: _deleteGalleryPhoto,
+              onVisibilityChange: _changePhotoVisibility,
+              onSetAsAvatar: _setPhotoAsAvatar,
+            ),
+            const SizedBox(height: 40),
+          ],
+        ],
+      ),
     );
   }
 
@@ -1274,8 +1337,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                                 fontWeight: FontWeight.w800,
                                 color: canSave
                                     ? Colors.white
-                                    : Colors.white
-                                        .withOpacity(0.4),
+                                    : Colors.white.withOpacity(0.4),
                               ),
                             ),
                     ),
@@ -1285,7 +1347,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
             ),
           ),
         ),
-
         Expanded(
           child: SingleChildScrollView(
             physics: const ClampingScrollPhysics(),
@@ -1357,10 +1418,8 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                             border: Border.all(
                                 color: AppTheme.bg, width: 3),
                           ),
-                          child: const Icon(
-                              Icons.camera_alt_rounded,
-                              color: Colors.white,
-                              size: 14),
+                          child: const Icon(Icons.camera_alt_rounded,
+                              color: Colors.white, size: 14),
                         ),
                       ),
                     ),
@@ -1375,9 +1434,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-
                 const SizedBox(height: 28),
-
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 20),
                   child: ClipRRect(
@@ -1386,14 +1443,13 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                       filter:
                           ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                       child: Container(
-                        padding: const EdgeInsets.fromLTRB(
-                            18, 18, 18, 16),
+                        padding:
+                            const EdgeInsets.fromLTRB(18, 18, 18, 16),
                         decoration: BoxDecoration(
                           color: Colors.black.withOpacity(0.35),
                           borderRadius: BorderRadius.circular(18),
                           border: Border.all(
-                              color:
-                                  Colors.white.withOpacity(0.15)),
+                              color: Colors.white.withOpacity(0.15)),
                         ),
                         child: Column(
                           crossAxisAlignment:
@@ -1491,64 +1547,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     '👑', '💎', '💍', '👗', '👠', '🎩', '🕶️', '💄',
     '☕', '🍵', '🧃', '🍹', '🍸', '🥂', '🍷', '🍾',
   ];
-}
-
-// ═══════════════════════════════════════════════════
-// 전체 화면 이미지 뷰어
-// ═══════════════════════════════════════════════════
-class _FullscreenImageViewer extends StatelessWidget {
-  final String url;
-
-  const _FullscreenImageViewer({required this.url});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          GestureDetector(
-            onTap: () => Navigator.pop(context),
-            child: Container(
-              color: Colors.black,
-              child: Center(
-                child: InteractiveViewer(
-                  minScale: 0.5,
-                  maxScale: 4.0,
-                  child: Image.network(
-                    url,
-                    fit: BoxFit.contain,
-                    filterQuality: FilterQuality.high,
-                    loadingBuilder: (context, child, progress) {
-                      if (progress == null) return child;
-                      return Center(
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          value: progress.expectedTotalBytes != null
-                              ? progress.cumulativeBytesLoaded /
-                                  progress.expectedTotalBytes!
-                              : null,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
-            ),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(8),
-              child: _GlassIconButton(
-                icon: Icons.close_rounded,
-                onTap: () => Navigator.pop(context),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class _DefaultBackground extends StatelessWidget {
@@ -1818,8 +1816,7 @@ class _GlassTextFieldState extends State<_GlassTextField> {
   Widget build(BuildContext context) {
     return AnimatedContainer(
       duration: const Duration(milliseconds: 200),
-      padding:
-          const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
       decoration: BoxDecoration(
         color: Colors.black.withOpacity(_focused ? 0.55 : 0.4),
         borderRadius: BorderRadius.circular(12),
