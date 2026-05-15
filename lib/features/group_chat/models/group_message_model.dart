@@ -33,6 +33,12 @@ class GroupMessageModel {
   final int? fileSize;
   final String? fileType;
 
+  // 📍 위치 공유 ID
+  final String? locationShareId;
+
+  // 📅 일정 잡기 ID
+  final String? scheduleEventId;
+
   GroupMessageModel({
     required this.id,
     required this.roomId,
@@ -57,6 +63,8 @@ class GroupMessageModel {
     this.fileName,
     this.fileSize,
     this.fileType,
+    this.locationShareId,              // 📍
+    this.scheduleEventId,              // 📅
   });
 
   factory GroupMessageModel.fromJson(Map<String, dynamic> json) {
@@ -92,6 +100,8 @@ class GroupMessageModel {
       fileName:              json['file_name'] as String?,
       fileSize:              json['file_size'] as int?,
       fileType:              json['file_type'] as String?,
+      locationShareId:       json['location_share_id'] as String?,      // 📍
+      scheduleEventId:       json['schedule_event_id'] as String?,      // 📅
     );
   }
 
@@ -102,6 +112,8 @@ class GroupMessageModel {
   bool get isGameMessage  => gameData != null;
   bool get isPollMessage  => pollId != null;
   bool get isFileMessage  => fileUrl != null;
+  bool get isLocationShareMessage => locationShareId != null;           // 📍
+  bool get isScheduleMessage => scheduleEventId != null;                // 📅
 
   /// ⭐ 모든 이미지를 단일 리스트로
   List<String> get allImageUrls {

@@ -9,20 +9,19 @@ import '../../chat/widgets/linkified_text.dart';
 import '../../chat/widgets/multi_image_grid.dart';
 import '../../chat/widgets/reaction_chips.dart';
 import '../../chat/widgets/voice_message_bubble.dart';
+import '../../location/screens/location_share_map_screen.dart';            // 📍
+import '../../location/widgets/location_share_card.dart';                  // 📍
 import '../../polls/widgets/poll_bubble.dart';
+import '../../schedule/screens/schedule_response_screen.dart';             // 📅
+import '../../schedule/widgets/schedule_card.dart';                        // 📅
 import '../models/group_message_model.dart';
 
 // ═══════════════════════════════════════════════════
 // 💬 GroupMessageBubble — 리디자인
 //
-// 변경 (DM과 통일):
-// - 내 메시지: primary 그라데이션 + 그림자
-// - 상대 메시지: bgCard 카드 + 미세 보더 + 그림자
-// - 답장 미리보기: 컬러 바 + 미세 배경
-// - 모서리: 18px (꼬리 4px)
-// - 발신자 닉네임: 더 큰 폰트 + 보더
-// - 시간: w500
-// - 삭제된 메시지: 흐릿한 이탤릭
+// 변경:
+// - 📍 위치 공유 메시지: LocationShareCard
+// - 📅 일정 잡기 메시지: ScheduleCard
 // ═══════════════════════════════════════════════════
 
 class GroupMessageBubble extends StatelessWidget {
@@ -131,6 +130,42 @@ class GroupMessageBubble extends StatelessWidget {
   }
 
   Widget _buildContent(BuildContext context) {
+    // 📅 일정 잡기 메시지
+    if (msg.scheduleEventId != null && !msg.isDeleted) {
+      return ScheduleCard(
+        eventId: msg.scheduleEventId!,
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ScheduleResponseScreen(
+                eventId: msg.scheduleEventId!,
+              ),
+            ),
+          );
+        },
+      );
+    }
+
+    // 📍 위치 공유 메시지
+    if (msg.locationShareId != null && !msg.isDeleted) {
+      return LocationShareCard(
+        shareId: msg.locationShareId!,
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => LocationShareMapScreen(
+                roomId: roomId,
+                roomType: 'group',
+                focusShareId: msg.locationShareId,
+              ),
+            ),
+          );
+        },
+      );
+    }
+
     if (msg.pollId != null && !msg.isDeleted) {
       return PollBubble(pollId: msg.pollId!, isMe: isMe);
     }
@@ -210,7 +245,6 @@ class GroupMessageBubble extends StatelessWidget {
               ? CrossAxisAlignment.end
               : CrossAxisAlignment.start,
           children: [
-            // ─── 발신자 닉네임 ──────────
             if (!isMe && showSenderInfo)
               Padding(
                 padding: const EdgeInsets.only(left: 38, bottom: 4),
@@ -225,7 +259,6 @@ class GroupMessageBubble extends StatelessWidget {
                 ),
               ),
 
-            // ─── 답장 미리보기 ──────────
             if (msg.replyToContent != null)
               Padding(
                 padding: EdgeInsets.only(
@@ -290,7 +323,6 @@ class GroupMessageBubble extends StatelessWidget {
                 ),
               ),
 
-            // ─── 메시지 본문 ──────────
             Row(
               mainAxisAlignment: isMe
                   ? MainAxisAlignment.end
@@ -365,7 +397,6 @@ class GroupMessageBubble extends StatelessWidget {
               ],
             ),
 
-            // ─── 리액션 ──────────
             Padding(
               padding: EdgeInsets.only(
                 left: isMe ? 0 : 38,

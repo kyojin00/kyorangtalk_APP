@@ -63,6 +63,11 @@ Future<DateTime?> _getHiddenAt(String roomId) async {
 
 // ═══════════════════════════════════════════════
 // 채팅 목록 (실시간)
+//
+// ⭐ 성능 패치 (2026-05):
+//   1) sub_profiles !inner join → RPC get_visible_sub_profiles
+//   2) unread row 통째로 받기 → RPC get_unread_counts_for_rooms
+//   3) scheduleRefetch debounce 300ms → 500ms
 // ═══════════════════════════════════════════════
 final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
   final user = _supabase.auth.currentUser!;
@@ -98,22 +103,14 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
           .from('kyorangtalk_profiles')
           .select('id, nickname, avatar_url')
           .inFilter('id', partnerIds),
-      _supabase
-          .from('kyorangtalk_sub_profiles')
-          .select('''
-            user_id, nickname, avatar_url,
-            kyorangtalk_sub_profile_viewers!inner(viewer_id)
-          ''')
-          .inFilter('user_id', partnerIds)
-          .eq('kyorangtalk_sub_profile_viewers.viewer_id', user.id),
-      // ⭐ unread 계산 시 hidden_at 이후만 카운트
-      _supabase
-          .from('kyorangtalk_messages')
-          .select('room_id, created_at')
-          .inFilter('room_id', roomIds)
-          .eq('is_read', false)
-          .neq('sender_id', user.id),
-      // ⭐ 내 room_user_state 조회
+      _supabase.rpc('get_visible_sub_profiles', params: {
+        'p_viewer_id': user.id,
+        'p_user_ids': partnerIds,
+      }),
+      _supabase.rpc('get_unread_counts_for_rooms', params: {
+        'p_user_id': user.id,
+        'p_room_ids': roomIds,
+      }),
       _supabase
           .from('kyorangtalk_room_user_state')
           .select('room_id, hidden_at, cleared_at')
@@ -136,7 +133,6 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
           sp as Map<String, dynamic>;
     }
 
-    // ⭐ room_id → hidden_at (cleared_at이 있으면 무시)
     final hiddenAtMap = <String, DateTime>{};
     for (final s in stateList) {
       if (s['cleared_at'] != null) continue;
@@ -146,22 +142,16 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
         hiddenAtMap[rid] = DateTime.parse(hiddenAtStr);
       }
     }
-    // 캐시 갱신
     _roomHiddenAtCache.clear();
     for (final entry in hiddenAtMap.entries) {
       _roomHiddenAtCache[entry.key] = entry.value;
     }
 
-    // ⭐ unread 카운트 — hidden_at 이후 메시지만 카운트
     final unreadMap = <String, int>{};
     for (final m in unreadList) {
       final rid = m['room_id'] as String;
-      final createdAt = DateTime.parse(m['created_at'] as String);
-      final hiddenAt = hiddenAtMap[rid];
-      if (hiddenAt != null && createdAt.isBefore(hiddenAt)) {
-        continue;  // 나간 시점 이전 메시지는 unread로 안 침
-      }
-      unreadMap[rid] = (unreadMap[rid] ?? 0) + 1;
+      final count = (m['unread_count'] as num).toInt();
+      unreadMap[rid] = count;
     }
 
     final list = visibleRooms.map((r) {
@@ -212,7 +202,7 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
   Timer? refetchTimer;
   void scheduleRefetch() {
     refetchTimer?.cancel();
-    refetchTimer = Timer(const Duration(milliseconds: 300), () {
+    refetchTimer = Timer(const Duration(milliseconds: 500), () {
       fetchRooms().then((data) {
         if (!controller.isClosed) controller.add(data);
       }).catchError((e) {
@@ -227,7 +217,6 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
     print('🔴 chatRooms 초기 로드 실패: $e');
   });
 
-  // rooms 테이블 구독
   final roomsChannel = _supabase
       .channel('chat_rooms_${user.id}')
       .onPostgresChanges(
@@ -244,7 +233,6 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
       )
       .subscribe();
 
-  // messages 테이블 구독 — 읽음/새 메시지 실시간 반영
   final messagesChannel = _supabase
       .channel('chat_rooms_messages_${user.id}')
       .onPostgresChanges(
@@ -275,7 +263,6 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
       )
       .subscribe();
 
-  // room_user_state 구독 (나가기/복원 시 즉시 반영)
   final stateChannel = _supabase
       .channel('chat_rooms_state_${user.id}')
       .onPostgresChanges(
@@ -309,7 +296,6 @@ final messagesProvider =
   final ctrl = _RoomMessageController(roomId, streamController);
   _activeControllers[roomId] = ctrl;
 
-  // ⭐ hidden_at 조회 후 초기 로드
   () async {
     final hiddenAt = await _getHiddenAt(roomId);
     ctrl.hiddenAt = hiddenAt;
@@ -320,7 +306,6 @@ final messagesProvider =
         .eq('room_id', roomId);
 
     if (hiddenAt != null) {
-      // 나간 시점 이후 메시지만
       query = query.gte('created_at', hiddenAt.toIso8601String());
     }
 
@@ -359,7 +344,6 @@ final messagesProvider =
           final newRow = payload.newRecord;
           if (newRow.isEmpty) return;
           final msg = MessageModel.fromJson(newRow);
-          // ⭐ hidden_at 이전 메시지는 무시
           if (ctrl.hiddenAt != null &&
               msg.createdAt.isBefore(ctrl.hiddenAt!)) {
             return;
@@ -393,6 +377,7 @@ final messagesProvider =
           final id = updated['id'] as String?;
           final isRead = updated['is_read'] as bool? ?? false;
           final isDeleted = updated['is_deleted'] as bool? ?? false;
+          final content = updated['content'] as String?;      // ⭐ NEW
           final transcript = updated['audio_transcript'] as String?;
           final transcriptStatus =
               updated['audio_transcript_status'] as String?;
@@ -400,6 +385,7 @@ final messagesProvider =
           ctrl.messages = ctrl.messages.map((m) {
             if (m.id == id) {
               return m.copyWith(
+                content: content,                              // ⭐ NEW
                 isRead: isRead,
                 isDeleted: isDeleted,
                 audioTranscript: transcript,
@@ -424,7 +410,6 @@ final messagesProvider =
 
 // ═══════════════════════════════════════════════
 // 더 오래된 메시지 가져오기
-// ⭐ hidden_at 이전은 가져오지 않음
 // ═══════════════════════════════════════════════
 Future<bool> loadOlderMessages(String roomId) async {
   final ctrl = _activeControllers[roomId];
@@ -443,7 +428,6 @@ Future<bool> loadOlderMessages(String roomId) async {
         .eq('room_id', roomId)
         .lt('created_at', oldestTime.toIso8601String());
 
-    // ⭐ hidden_at 이후만
     if (ctrl.hiddenAt != null) {
       query = query.gte('created_at', ctrl.hiddenAt!.toIso8601String());
     }
@@ -498,6 +482,8 @@ Future<void> sendMessage({
   String? fileName,
   int? fileSize,
   String? fileType,
+  String? locationShareId,            // 📍
+  String? scheduleEventId,            // 📅
 }) async {
   await _supabase.from('kyorangtalk_messages').insert({
     'room_id':    roomId,
@@ -505,23 +491,29 @@ Future<void> sendMessage({
     'content':    content.trim(),
     'is_read':    false,
     'is_deleted': false,
-    if (imageUrl != null)               'image_url':        imageUrl,
+    if (imageUrl != null)               'image_url':         imageUrl,
     if (imageUrls != null && imageUrls.isNotEmpty)
-                                        'image_urls':       imageUrls,
-    if (audioUrl != null)               'audio_url':        audioUrl,
-    if (audioDuration != null)          'audio_duration':   audioDuration,
-    if (replyToId != null)              'reply_to_id':      replyToId,
-    if (replyToContent != null)         'reply_to_content': replyToContent,
-    if (gameData != null)               'game_data':        gameData,
-    if (pollId != null)                 'poll_id':          pollId,
-    if (fileUrl != null)                'file_url':         fileUrl,
-    if (fileName != null)               'file_name':        fileName,
-    if (fileSize != null)               'file_size':        fileSize,
-    if (fileType != null)               'file_type':        fileType,
+                                        'image_urls':        imageUrls,
+    if (audioUrl != null)               'audio_url':         audioUrl,
+    if (audioDuration != null)          'audio_duration':    audioDuration,
+    if (replyToId != null)              'reply_to_id':       replyToId,
+    if (replyToContent != null)         'reply_to_content':  replyToContent,
+    if (gameData != null)               'game_data':         gameData,
+    if (pollId != null)                 'poll_id':           pollId,
+    if (fileUrl != null)                'file_url':          fileUrl,
+    if (fileName != null)               'file_name':         fileName,
+    if (fileSize != null)               'file_size':         fileSize,
+    if (fileType != null)               'file_type':         fileType,
+    if (locationShareId != null)        'location_share_id': locationShareId,   // 📍
+    if (scheduleEventId != null)        'schedule_event_id': scheduleEventId,   // 📅
   });
 
   String lastMessageText;
-  if (fileUrl != null) {
+  if (scheduleEventId != null) {
+    lastMessageText = '📅 일정을 잡고 있어요';
+  } else if (locationShareId != null) {
+    lastMessageText = '📍 실시간 위치를 공유했어요';
+  } else if (fileUrl != null) {
     lastMessageText = '📎 ${fileName ?? "파일"}';
   } else if (pollId != null) {
     lastMessageText = '📊 ${content.trim().isEmpty ? "투표" : content.trim()}';
@@ -538,8 +530,6 @@ Future<void> sendMessage({
     lastMessageText = content.trim();
   }
 
-  // ⭐ rooms 업데이트 — hidden_by 빈 배열로 리셋 (목록에 다시 등장)
-  //    하지만 hidden_at은 그대로 유지 (옛 메시지는 계속 숨김)
   _supabase
     .rpc('kyorangtalk_update_room_on_message', params: {
       'p_room_id': roomId,
@@ -559,8 +549,7 @@ Future<void> setPinnedMessage(String roomId, String? message) async {
       .eq('id', roomId);
 }
 
-// ── 채팅방 나가기 (카카오 서랍) ──
-// hidden_by + hidden_at 동시 처리, RPC로 트랜잭션 보장
+// ── 채팅방 나가기 ──
 Future<void> hideChatRoom(String roomId) async {
   try {
     await _supabase.rpc(
@@ -573,7 +562,7 @@ Future<void> hideChatRoom(String roomId) async {
   }
 }
 
-// ── 결제로 옛 메시지 복원 (미래) ──
+// ── 복원 ──
 Future<void> restoreChatRoom(String roomId) async {
   try {
     await _supabase.rpc(

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/notifications/fcm_service.dart';
+import 'core/security/app_lock_guard.dart';                  // ⭐ NEW
 import 'core/theme/app_theme.dart';
 import 'core/theme/theme_provider.dart';
 import 'features/auth/screens/login_screen.dart';
@@ -211,13 +212,16 @@ class KyorangTalkApp extends ConsumerWidget {
         AppTheme.setDark(isDark);
 
         // ⭐ CallRouter를 최상위 Stack에 배치 — 어디서든 들어오는 통화 감지
+        // ⭐ AppLockGuard로 감싸서 라이프사이클 가드 (백그라운드 → 잠금)
         return KeyedSubtree(
           key: ValueKey<bool>(isDark),
-          child: Stack(
-            children: [
-              child ?? const SizedBox(),
-              const CallRouter(),
-            ],
+          child: AppLockGuard(
+            child: Stack(
+              children: [
+                child ?? const SizedBox(),
+                const CallRouter(),
+              ],
+            ),
           ),
         );
       },

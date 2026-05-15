@@ -33,6 +33,9 @@ import '../widgets/group_empty_state.dart';
 import '../widgets/system_message.dart';
 import 'group_members_screen.dart';
 import 'group_room_info_screen.dart';
+import '../../location/widgets/location_share_start_sheet.dart';
+import '../../schedule/widgets/schedule_create_sheet.dart';
+
 
 class GroupChatRoomScreen extends ConsumerStatefulWidget {
   final GroupRoomModel room;
@@ -337,11 +340,47 @@ class _GroupChatRoomScreenState
     switch (action) {
       case 'gallery': await _pickAndSendImage(ImageSource.gallery); break;
       case 'camera':  await _pickAndSendImage(ImageSource.camera);  break;
-      case 'voice':   await _recordVoice();                          break;
-      case 'game':    await _sendGame();                             break;
-      case 'poll':    await _sendPoll();                             break;
-      case 'file':    await _sendFile();                             break;
+      case 'voice':   await _recordVoice();                         break;
+      case 'game':    await _sendGame();                            break;
+      case 'poll':    await _sendPoll();                            break;
+      case 'file':    await _sendFile();                            break;
+      case 'location': await _shareLocation();                      break;
+      case 'schedule': await _shareSchedule();                      break;
     }
+  }
+
+  // 📅 일정 잡기
+Future<void> _shareSchedule() async {
+    final event = await showScheduleCreateSheet(
+      context,
+      roomId:   widget.room.id,
+      roomType: 'group',
+    );
+    if (event == null || !mounted) return;
+
+    await sendGroupMessage(
+      roomId:          widget.room.id,
+      senderId:        _myId,
+      content:         '일정을 잡고 있어요',
+      scheduleEventId: event.id,
+    );
+  }
+
+
+  Future<void> _shareLocation() async {
+    final share = await showLocationShareStartSheet(
+      context,
+      roomId: widget.room.id,
+      roomType: 'group',
+    );
+    if (share == null || !mounted) return;
+
+    await sendGroupMessage(
+      roomId: widget.room.id,
+      senderId: _myId,
+      content: '실시간 위치를 공유했어요',
+      locationShareId: share.id,
+    );
   }
 
   Future<void> _sendGame() async {

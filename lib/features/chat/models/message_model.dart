@@ -31,6 +31,12 @@ class MessageModel {
   final int? fileSize;
   final String? fileType;
 
+  // 📍 위치 공유 ID
+  final String? locationShareId;
+
+  // 📅 일정 잡기 ID
+  final String? scheduleEventId;
+
   MessageModel({
     required this.id,
     required this.senderId,
@@ -53,6 +59,8 @@ class MessageModel {
     this.fileName,
     this.fileSize,
     this.fileType,
+    this.locationShareId,              // 📍
+    this.scheduleEventId,              // 📅
   });
 
   factory MessageModel.fromJson(Map<String, dynamic> json) {
@@ -86,10 +94,13 @@ class MessageModel {
       fileName:               json['file_name'] as String?,
       fileSize:               json['file_size'] as int?,
       fileType:               json['file_type'] as String?,
+      locationShareId:        json['location_share_id'] as String?,     // 📍
+      scheduleEventId:        json['schedule_event_id'] as String?,     // 📅
     );
   }
 
   MessageModel copyWith({
+    String? content,                    // ⭐ NEW: 삭제 시 content 갱신용
     bool? isRead,
     bool? isDeleted,
     String? audioTranscript,
@@ -99,7 +110,7 @@ class MessageModel {
       id:                    id,
       senderId:              senderId,
       receiverId:            receiverId,
-      content:               content,
+      content:               content ?? this.content,                  // ⭐ NEW
       isRead:                isRead ?? this.isRead,
       isDeleted:             isDeleted ?? this.isDeleted,
       createdAt:             createdAt,
@@ -117,6 +128,8 @@ class MessageModel {
       fileName:              fileName,
       fileSize:              fileSize,
       fileType:              fileType,
+      locationShareId:       locationShareId,                           // 📍
+      scheduleEventId:       scheduleEventId,                           // 📅
     );
   }
 
@@ -127,6 +140,8 @@ class MessageModel {
   bool get isGameMessage  => gameData != null;
   bool get isPollMessage  => pollId != null;
   bool get isFileMessage  => fileUrl != null;
+  bool get isLocationShareMessage => locationShareId != null;           // 📍
+  bool get isScheduleMessage => scheduleEventId != null;                // 📅
 
   /// ⭐ 모든 이미지를 단일 리스트로 (단일 + 다중 통합 - 뷰어/그리드에서 사용)
   List<String> get allImageUrls {

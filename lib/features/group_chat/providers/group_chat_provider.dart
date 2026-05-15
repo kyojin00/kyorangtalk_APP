@@ -31,7 +31,6 @@ _ProfileCache _getCache(String roomId) {
 
 // ═══════════════════════════════════════════════
 // ⭐ #2: 내 sub_profile_id 캐시 (방 단위)
-// 메시지 보낼 때마다 조회하지 않도록
 // ═══════════════════════════════════════════════
 final Map<String, String?> _mySubProfileCache = {};
 final Map<String, bool> _mySubProfileResolved = {};
@@ -67,7 +66,9 @@ final Map<String, _GroupRoomMessageController> _activeGroupControllers = {};
 // ═══════════════════════════════════════════════
 // 내가 참여한 그룹/오픈 채팅 목록 (실시간)
 //
-// ⭐ #1: unread count 쿼리를 N+1 → 1로 통합
+// ⭐ 최적화 (2026-05):
+//   - unread count: 클라이언트 계산 → RPC로 DB에서 처리
+//   - 네트워크 트래픽 감소, 응답 속도 ↑
 // ═══════════════════════════════════════════════
 final groupRoomsProvider = StreamProvider<List<GroupRoomModel>>((ref) {
   final user = _supabase.auth.currentUser!;
@@ -93,71 +94,28 @@ final groupRoomsProvider = StreamProvider<List<GroupRoomModel>>((ref) {
           m['room_id'] as String: m['joined_at'] as String
       };
 
-      // ⭐ 병렬: rooms + reads (서로 독립)
-      final parallelResults = await Future.wait([
-        _supabase
-            .from('kyorangtalk_group_rooms')
-            .select('*')
-            .inFilter('id', roomIds)
-            .order('last_message_at', ascending: false),
-        _supabase
-            .from('kyorangtalk_group_reads')
-            .select('room_id, last_read_at')
-            .eq('user_id', user.id)
-            .inFilter('room_id', roomIds),
-      ]);
+      // ⭐ 병렬 처리: 방 정보 + unread count (RPC)
+    // ⭐ 병렬 처리: 방 정보 + unread count (RPC)
+          final parallelResults = await Future.wait<dynamic>([
+            _supabase
+                .from('kyorangtalk_group_rooms')
+                .select('*')
+                .inFilter('id', roomIds)
+                .order('last_message_at', ascending: false),
+            _supabase.rpc('get_group_unread_counts', params: {
+              'p_user_id': user.id,
+              'p_room_ids': roomIds,
+            }),
+          ]);
 
       final rooms = parallelResults[0] as List;
-      final reads = parallelResults[1] as List;
+      final unreadList = parallelResults[1] as List;
 
-      final readMap = <String, DateTime>{};
-      for (final r in reads) {
-        readMap[r['room_id'] as String] =
-            DateTime.parse(r['last_read_at'] as String).toLocal();
-      }
-
-      // ⭐⭐⭐ #1: 각 방의 sinceTime 중 가장 오래된 것 하나로 IN 쿼리 한 번
-      //
-      // 옛날 방의 sinceTime이 매우 옛날이면 결과가 많아질 수 있지만,
-      // is_deleted=false 필터 + 가벼운 컬럼만 select 하면 N+1 직렬보다 훨씬 빠름.
-      // 또한 보통 사용자의 last_read는 최근이므로 결과 자체도 작음.
-      DateTime? earliestSince;
-      final sinceMap = <String, DateTime>{};
-
-      for (final roomId in roomIds) {
-        final lastRead = readMap[roomId];
-        final joinedAtStr = joinedAtMap[roomId]!;
-        final joinTime = DateTime.parse(joinedAtStr).toUtc();
-        final sinceTime = lastRead != null
-            ? (joinTime.isAfter(lastRead.toUtc())
-                ? joinTime
-                : lastRead.toUtc())
-            : joinTime;
-        sinceMap[roomId] = sinceTime;
-        if (earliestSince == null || sinceTime.isBefore(earliestSince)) {
-          earliestSince = sinceTime;
-        }
-      }
-
-      // 한 번에 모든 방의 unread 후보 메시지 조회
       final unreadCounts = <String, int>{};
-      if (earliestSince != null) {
-        final candidates = await _supabase
-            .from('kyorangtalk_group_messages')
-            .select('id, room_id, created_at, sender_id')
-            .inFilter('room_id', roomIds)
-            .neq('sender_id', user.id)
-            .gt('created_at', earliestSince.toIso8601String());
-
-        // 클라이언트에서 방별 sinceTime 기준으로 카운트
-        for (final m in candidates) {
-          final rid = m['room_id'] as String;
-          final createdAt = DateTime.parse(m['created_at'] as String).toUtc();
-          final since = sinceMap[rid];
-          if (since != null && createdAt.isAfter(since)) {
-            unreadCounts[rid] = (unreadCounts[rid] ?? 0) + 1;
-          }
-        }
+      for (final row in unreadList) {
+        final rid = row['room_id'] as String;
+        final count = (row['unread_count'] as num).toInt();
+        unreadCounts[rid] = count;
       }
 
       return rooms.map((r) {
@@ -521,7 +479,7 @@ Future<bool> toggleRoomLike(String roomId) async {
 }
 
 // ═══════════════════════════════════════════════
-// ⭐ #2: 내 sub_profile_id — 캐시 사용
+// 내 sub_profile_id — 캐시
 // ═══════════════════════════════════════════════
 Future<String?> getMySubProfileInRoom(String roomId) async {
   if (_mySubProfileResolved[roomId] == true) {
@@ -570,7 +528,7 @@ Future<bool> checkHasRoomAdmin(String roomId) async {
 }
 
 // ═══════════════════════════════════════════════
-// 그룹 메시지 목록 (페이지네이션 + 실시간)
+// 그룹 메시지 목록
 // ═══════════════════════════════════════════════
 final groupMessagesProvider =
     StreamProvider.family.autoDispose<List<GroupMessageModel>, String>(
@@ -653,6 +611,8 @@ final groupMessagesProvider =
                 fileName:              m.fileName,
                 fileSize:              m.fileSize,
                 fileType:              m.fileType,
+                locationShareId:       m.locationShareId,       // 📍
+                scheduleEventId:       m.scheduleEventId,       // 📅
               );
             }
             return m;
@@ -667,7 +627,6 @@ final groupMessagesProvider =
     streamController.close();
     _activeGroupControllers.remove(roomId);
     _roomProfileCaches.remove(roomId);
-    // ⭐ 내 sub_profile도 비움 (다음 진입 시 갱신)
     invalidateMySubProfileCache(roomId);
   });
 
@@ -681,48 +640,72 @@ class _InitialLoadResult {
   _InitialLoadResult(this.messages, this.joinedAt, this.hasMore);
 }
 
+// ⭐ 최적화 (2026-05):
+//   - member 조회 + 메시지 조회를 Future.wait로 병렬 처리
+//   - joined_at 필터를 클라이언트에서 적용 (member 결과 받은 후)
 Future<_InitialLoadResult> _loadInitialGroupMessages(
     String roomId, int limit) async {
   final user = _supabase.auth.currentUser;
   if (user == null) return _InitialLoadResult([], null, false);
 
-  // ⭐ 1단계: members 조회와 동시에 내 sub_profile_id도 같이 캐싱
-  final myMember = await _supabase
-      .from('kyorangtalk_group_members')
-      .select('joined_at, sub_profile_id')
-      .eq('room_id', roomId)
-      .eq('user_id', user.id)
-      .maybeSingle();
+  // ⭐ 병렬 처리: 멤버 정보 + 메시지 limit*2 가져오기
+  //   member 조회가 끝나기 전에 메시지부터 가져오기 시작
+  //   joined_at 필터는 결과 받은 후 클라이언트에서 적용
+  //   (대부분의 경우 joined_at 이후가 limit개 안에 들어옴)
+  final results = await Future.wait<dynamic>([
+    _supabase
+        .from('kyorangtalk_group_members')
+        .select('joined_at, sub_profile_id')
+        .eq('room_id', roomId)
+        .eq('user_id', user.id)
+        .maybeSingle(),
+    _supabase
+        .from('kyorangtalk_group_messages')
+        .select('*')
+        .eq('room_id', roomId)
+        .order('created_at', ascending: false)
+        .limit(limit),
+  ]);
+
+  final myMember = results[0] as Map<String, dynamic>?;
+  var msgs = results[1] as List;
 
   DateTime? joinedAt;
   if (myMember != null) {
     joinedAt = DateTime.parse(myMember['joined_at'] as String);
-    // ⭐ #2: 내 sub_profile_id 캐싱 (메시지 전송 시 추가 쿼리 없음)
     _mySubProfileCache[roomId] =
         myMember['sub_profile_id'] as String?;
     _mySubProfileResolved[roomId] = true;
   }
 
-  // 2단계: messages
-  var query = _supabase
-      .from('kyorangtalk_group_messages')
-      .select('*')
-      .eq('room_id', roomId);
-
+  // ⭐ joined_at 이전 메시지 필터링 (클라이언트)
   if (joinedAt != null) {
-    query = query.gte('created_at', joinedAt.toIso8601String());
+    msgs = msgs.where((m) {
+      final createdAt = DateTime.parse(m['created_at'] as String);
+      return !createdAt.isBefore(joinedAt!);
+    }).toList();
   }
 
-  final msgs = await query
-      .order('created_at', ascending: false)
-      .limit(limit);
+  // ⭐ 필터링 후 메시지가 적으면 다시 가져옴 (joined_at gte로)
+  //   드물게 발생하는 케이스 (오래된 방에 최근 가입)
+  if (joinedAt != null && msgs.length < limit) {
+    final refetched = await _supabase
+        .from('kyorangtalk_group_messages')
+        .select('*')
+        .eq('room_id', roomId)
+        .gte('created_at', joinedAt.toIso8601String())
+        .order('created_at', ascending: false)
+        .limit(limit);
+    msgs = refetched as List;
+  }
 
   if (msgs.isEmpty) return _InitialLoadResult([], joinedAt, false);
 
   final hasMore = msgs.length >= limit;
-
-  // 3단계: profiles + sub_profiles 병렬 enrichment
-  final enriched = await _enrichMessages(roomId, msgs);
+  final enriched = await _enrichMessages(
+    roomId,
+    msgs.map((m) => m as Map<String, dynamic>).toList(),
+  );
 
   return _InitialLoadResult(enriched, joinedAt, hasMore);
 }
@@ -945,7 +928,7 @@ Future<void> markGroupRoomRead(String roomId) async {
 }
 
 // ═══════════════════════════════════════════════
-// ⭐ 그룹 메시지 전송 — getMySubProfileInRoom 캐시 사용
+// 그룹 메시지 전송
 // ═══════════════════════════════════════════════
 Future<void> sendGroupMessage({
   required String roomId,
@@ -963,12 +946,17 @@ Future<void> sendGroupMessage({
   String? fileName,
   int? fileSize,
   String? fileType,
+  String? locationShareId,                  // 📍
+  String? scheduleEventId,                  // 📅
 }) async {
-  // ⭐ #2: 캐시에서 sub_profile_id 가져옴 (보통 0ms)
   final subProfileId = await getMySubProfileInRoom(roomId);
 
   String msgType;
-  if (fileUrl != null) {
+  if (scheduleEventId != null) {
+    msgType = 'schedule';
+  } else if (locationShareId != null) {
+    msgType = 'location_share';
+  } else if (fileUrl != null) {
     msgType = 'file';
   } else if (pollId != null) {
     msgType = 'poll';
@@ -988,24 +976,30 @@ Future<void> sendGroupMessage({
     'content':          content.trim(),
     'msg_type':         msgType,
     'is_deleted':       false,
-    if (subProfileId != null)   'sub_profile_id':   subProfileId,
-    if (imageUrl != null)       'image_url':        imageUrl,
+    if (subProfileId != null)    'sub_profile_id':    subProfileId,
+    if (imageUrl != null)        'image_url':         imageUrl,
     if (imageUrls != null && imageUrls.isNotEmpty)
-                                'image_urls':       imageUrls,
-    if (audioUrl != null)       'audio_url':        audioUrl,
-    if (audioDuration != null)  'audio_duration':   audioDuration,
-    if (replyToId != null)      'reply_to_id':      replyToId,
-    if (replyToContent != null) 'reply_to_content': replyToContent,
-    if (gameData != null)       'game_data':        gameData,
-    if (pollId != null)         'poll_id':          pollId,
-    if (fileUrl != null)        'file_url':         fileUrl,
-    if (fileName != null)       'file_name':        fileName,
-    if (fileSize != null)       'file_size':        fileSize,
-    if (fileType != null)       'file_type':        fileType,
+                                 'image_urls':        imageUrls,
+    if (audioUrl != null)        'audio_url':         audioUrl,
+    if (audioDuration != null)   'audio_duration':    audioDuration,
+    if (replyToId != null)       'reply_to_id':       replyToId,
+    if (replyToContent != null)  'reply_to_content':  replyToContent,
+    if (gameData != null)        'game_data':         gameData,
+    if (pollId != null)          'poll_id':           pollId,
+    if (fileUrl != null)         'file_url':          fileUrl,
+    if (fileName != null)        'file_name':         fileName,
+    if (fileSize != null)        'file_size':         fileSize,
+    if (fileType != null)        'file_type':         fileType,
+    if (locationShareId != null) 'location_share_id': locationShareId,    // 📍
+    if (scheduleEventId != null) 'schedule_event_id': scheduleEventId,    // 📅
   });
 
   String lastMessageText;
-  if (fileUrl != null) {
+  if (scheduleEventId != null) {
+    lastMessageText = '📅 일정을 잡고 있어요';
+  } else if (locationShareId != null) {
+    lastMessageText = '📍 실시간 위치를 공유했어요';
+  } else if (fileUrl != null) {
     lastMessageText = '📎 ${fileName ?? "파일"}';
   } else if (pollId != null) {
     lastMessageText = '📊 ${content.trim().isEmpty ? "투표" : content.trim()}';
@@ -1021,7 +1015,6 @@ Future<void> sendGroupMessage({
     lastMessageText = content.trim();
   }
 
-  // fire-and-forget
   _supabase
       .from('kyorangtalk_group_rooms')
       .update({
@@ -1040,7 +1033,7 @@ Future<void> sendGroupMessage({
 }
 
 // ═══════════════════════════════════════════════
-// 비번 검증 결과 enum
+// 비번/가입
 // ═══════════════════════════════════════════════
 enum JoinResult {
   ok,
@@ -1088,7 +1081,6 @@ Future<JoinResult> joinRoomWithPassword({
               .update({'sub_profile_id': subProfileId})
               .eq('room_id', roomId)
               .eq('user_id', user.id);
-          // 캐시 갱신
           _mySubProfileCache[roomId] = subProfileId;
           _mySubProfileResolved[roomId] = true;
         }

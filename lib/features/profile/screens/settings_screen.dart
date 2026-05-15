@@ -10,6 +10,7 @@ import '../../friends/screens/friends_screen.dart';
 import '../../subscription/screens/drawer_screen.dart';
 import '../../subscription/screens/subscription_screen.dart';
 import '../../subscription/services/subscription_service.dart';
+import 'app_lock_settings_screen.dart';                       // ⭐ NEW
 import 'my_profile_screen.dart';
 import 'notification_settings_screen.dart';
 import 'blocked_users_screen.dart';
@@ -28,6 +29,7 @@ import 'privacy_management_screen.dart';
 // - 그룹화: 섹션별 카드 묶음 (그룹 구분 명확)
 // - 서랍 메뉴: 더 부각된 디자인
 // - 로그아웃: 빨간 톤 강조
+// - ⭐ 개인정보 섹션에 "앱 잠금" 메뉴 추가
 // ═══════════════════════════════════════════════════
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -320,22 +322,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                                   name: nickname,
                                   size: 56,
                                 ),
-                                Positioned(
-                                  right: 0,
-                                  bottom: 0,
-                                  child: Container(
-                                    width: 16,
-                                    height: 16,
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF22C55E),
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color: AppTheme.bg,
-                                        width: 2,
-                                      ),
-                                    ),
-                                  ),
-                                ),
                               ],
                             ),
                             const SizedBox(width: 14),
@@ -590,6 +576,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           MaterialPageRoute(
                             builder: (_) =>
                                 const PrivacyManagementScreen(),
+                          ),
+                        ),
+                      ),
+                      _Divider(),
+                      // ⭐ NEW: 앱 잠금
+                      _MenuItem(
+                        icon: Icons.lock_outline_rounded,
+                        iconColor: AppTheme.primary,
+                        iconBg: AppTheme.primary.withOpacity(0.15),
+                        label: '앱 잠금',
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                const AppLockSettingsScreen(),
                           ),
                         ),
                       ),

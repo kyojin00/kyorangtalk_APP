@@ -7,15 +7,17 @@ import '../../../core/theme/app_theme.dart';
 //
 // 사용법:
 // final action = await showAttachmentMenu(context);
-// 
+//
 // 반환값:
-// - 'gallery' : 갤러리에서 이미지
-// - 'camera'  : 카메라
-// - 'voice'   : 음성 녹음
-// - 'game'    : 게임
-// - 'poll'    : 투표
-// - 'file'    : 파일
-// - null      : 취소
+// - 'gallery'  : 갤러리에서 이미지
+// - 'camera'   : 카메라
+// - 'voice'    : 음성 녹음
+// - 'game'     : 게임
+// - 'poll'     : 투표
+// - 'file'     : 파일
+// - 'location' : 📍 위치 공유
+// - 'schedule' : 📅 일정 잡기
+// - null       : 취소
 // ═══════════════════════════════════════════════════
 
 Future<String?> showAttachmentMenu(BuildContext context) {
@@ -106,6 +108,32 @@ Future<String?> showAttachmentMenu(BuildContext context) {
                     onTap: () => Navigator.pop(context, 'file'),
                   ),
                 ),
+              ],
+            ),
+            const SizedBox(height: 12),
+
+            // 3줄: 위치 공유, 일정 잡기
+            Row(
+              children: [
+                Expanded(
+                  child: AttachmentButton(
+                    icon: Icons.location_on_outlined,
+                    label: '위치 공유',
+                    color: const Color(0xFFEF4444),
+                    onTap: () => Navigator.pop(context, 'location'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: AttachmentButton(
+                    icon: Icons.calendar_today_outlined,
+                    label: '일정 잡기',
+                    color: const Color(0xFF8B5CF6),
+                    onTap: () => Navigator.pop(context, 'schedule'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Expanded(child: SizedBox()),
               ],
             ),
           ],

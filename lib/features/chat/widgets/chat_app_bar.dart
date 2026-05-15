@@ -85,26 +85,6 @@ AppBar buildChatAppBar({
                       size: 36,
                     ),
                   ),
-                  if (isStatusLoaded &&
-                      isBlocked == false &&
-                      isBlockedByPartner == false &&
-                      friendStatus == 'accepted')
-                    Positioned(
-                      right: 0,
-                      bottom: 0,
-                      child: Container(
-                        width: 11,
-                        height: 11,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF22C55E),
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: AppTheme.bg,
-                            width: 2,
-                          ),
-                        ),
-                      ),
-                    ),
                 ],
               ),
               const SizedBox(width: 11),

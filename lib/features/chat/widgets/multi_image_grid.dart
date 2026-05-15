@@ -1,3 +1,4 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
 import '../screens/multi_image_viewer_screen.dart';
@@ -13,13 +14,10 @@ import '../screens/multi_image_viewer_screen.dart';
 //   4장 : 2x2 그리드
 //   5장+: 2x2 그리드 + 마지막 칸에 "+N" 오버레이
 //
-// 사용법
-//   MultiImageGrid(
-//     imageUrls: msg.allImageUrls,
-//     isMe: isMe,
-//     timeStr: '오후 2:34',
-//     senderName: '상대 이름',
-//   )
+// ⭐ 캐싱: cached_network_image 적용
+//   - 같은 URL은 디스크 + 메모리 캐시
+//   - 스크롤 시 재요청 없음
+//   - 첫 로드 후 인스턴트
 // ═══════════════════════════════════════════════════
 
 class MultiImageGrid extends StatelessWidget {
@@ -245,6 +243,7 @@ class MultiImageGrid extends StatelessWidget {
 
 // ═══════════════════════════════════════════════════
 // 개별 이미지 타일 (로딩/에러 상태 포함)
+// ⭐ CachedNetworkImage로 자동 캐싱
 // ═══════════════════════════════════════════════════
 class _ImageTile extends StatelessWidget {
   final String url;
@@ -252,29 +251,27 @@ class _ImageTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Image.network(
-      url,
+    return CachedNetworkImage(
+      imageUrl: url,
       fit: BoxFit.cover,
-      loadingBuilder: (_, child, progress) {
-        if (progress == null) return child;
-        return Container(
-          color: AppTheme.border,
-          alignment: Alignment.center,
-          child: SizedBox(
-            width: 24,
-            height: 24,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: AppTheme.primary,
-              value: progress.expectedTotalBytes != null
-                  ? progress.cumulativeBytesLoaded /
-                      progress.expectedTotalBytes!
-                  : null,
-            ),
+      // 메모리 캐시 크기 제한 (썸네일이므로 작게)
+      memCacheWidth: 480,
+      // 페이드인 부드럽게
+      fadeInDuration: const Duration(milliseconds: 150),
+      fadeOutDuration: const Duration(milliseconds: 100),
+      placeholder: (_, __) => Container(
+        color: AppTheme.border,
+        alignment: Alignment.center,
+        child: const SizedBox(
+          width: 24,
+          height: 24,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            color: AppTheme.primary,
           ),
-        );
-      },
-      errorBuilder: (_, __, ___) => Container(
+        ),
+      ),
+      errorWidget: (_, __, ___) => Container(
         color: AppTheme.border,
         alignment: Alignment.center,
         child: Icon(

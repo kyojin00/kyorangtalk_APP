@@ -16,6 +16,7 @@ import 'features/call/services/call_kit_service.dart';
 import 'features/chat/models/chat_room_model.dart';
 import 'features/chat/services/revenuecat_service.dart';
 import 'firebase_options.dart';
+import 'core/security/app_lock_guard.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 

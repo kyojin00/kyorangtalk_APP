@@ -35,6 +35,8 @@ import '../widgets/chat_pinned_reply.dart';
 import '../widgets/reaction_picker_bar.dart';
 import '../widgets/failed_message_bubble.dart';
 import '../../polls/widgets/create_poll_sheet.dart';
+import '../../location/widgets/location_share_start_sheet.dart';
+import '../../schedule/widgets/schedule_create_sheet.dart';
 
 class ChatRoomScreen extends ConsumerStatefulWidget {
   final ChatRoomModel room;
@@ -526,6 +528,7 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
     _sortedMessages = sorted;
   }
 
+
   Future<void> _handleAttachment() async {
     if (_isBlocked == true || _isBlockedByPartner == true) return;
     final action = await showAttachmentMenu(context);
@@ -537,7 +540,45 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
       case 'game':    await _sendGame();                             break;
       case 'poll':    await _sendPoll();                             break;
       case 'file':    await _sendFile();                             break;
+      case 'location': await _shareLocation();                       break;
+      case 'schedule': await _shareSchedule();                      break; 
     }
+  }
+
+  // 📅 일정 잡기
+Future<void> _shareSchedule() async {
+  final event = await showScheduleCreateSheet(
+    context,
+    roomId:   widget.room.roomId,
+    roomType: 'dm',
+  );
+  if (event == null || !mounted) return;
+
+  await sendMessage(
+    myId:            _myId,
+    roomId:          widget.room.roomId,
+    content:         '일정을 잡고 있어요',
+    scheduleEventId: event.id,
+  );
+}
+
+
+
+  // 📍 위치 공유
+  Future<void> _shareLocation() async {
+    final share = await showLocationShareStartSheet(
+      context,
+      roomId: widget.room.roomId,
+      roomType: 'dm',
+    );
+    if (share == null || !mounted) return;
+
+    await sendMessage(
+      myId: _myId,
+      roomId: widget.room.roomId,
+      content: '실시간 위치를 공유했어요',
+      locationShareId: share.id,
+    );
   }
 
   Future<void> _sendGame() async {

@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
+import '../../location/screens/location_share_map_screen.dart';            // 📍
+import '../../location/widgets/location_share_card.dart';                  // 📍
 import '../../polls/widgets/poll_bubble.dart';
+import '../../schedule/screens/schedule_response_screen.dart';             // 📅
+import '../../schedule/widgets/schedule_card.dart';                        // 📅
 import '../models/message_model.dart';
 import '../services/link_preview_service.dart';
 import 'file_bubble.dart';
@@ -16,13 +20,8 @@ import 'voice_message_bubble.dart';
 // 💬 MessageBubble — 리디자인
 //
 // 변경:
-// - 내 메시지: primary 그라데이션 + 그림자
-// - 상대 메시지: bgCard 카드 + 미세 보더 + 그림자
-// - 답장 미리보기: 컬러 바 + 미세 배경 (전송자 색에 맞춤)
-// - 모서리: 18px (꼬리 4px) → 더 부드럽게
-// - 시간: 더 작고 미세하게
-// - 검색 하이라이트: primary 글로우
-// - 삭제된 메시지: 흐릿한 이탤릭 + 미세 배경
+// - 📍 위치 공유 메시지: LocationShareCard
+// - 📅 일정 잡기 메시지: ScheduleCard
 // ═══════════════════════════════════════════════════
 
 class MessageGroup {
@@ -69,9 +68,6 @@ class MessageBubble extends StatelessWidget {
     this.onImageLoad,
   });
 
-  // ═══════════════════════════════════════════════════
-  // 텍스트 렌더 (URL 자동 감지 + 검색 하이라이트)
-  // ═══════════════════════════════════════════════════
   Widget _buildText(String text) {
     if (msg.isDeleted) {
       return Text(
@@ -103,9 +99,6 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
-  // ═══════════════════════════════════════════════════
-  // 버블 데코레이션 (내/상대 구분)
-  // ═══════════════════════════════════════════════════
   BoxDecoration _bubbleDecoration() {
     final radius = BorderRadius.only(
       topLeft: const Radius.circular(18),
@@ -129,7 +122,6 @@ class MessageBubble extends StatelessWidget {
     }
 
     if (isMe) {
-      // 내 메시지: primary 그라데이션 + 그림자
       return BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topLeft,
@@ -150,7 +142,6 @@ class MessageBubble extends StatelessWidget {
       );
     }
 
-    // 상대 메시지: 카드 + 미세 보더 + 그림자
     return BoxDecoration(
       color: AppTheme.bgCard,
       borderRadius: radius,
@@ -166,6 +157,42 @@ class MessageBubble extends StatelessWidget {
   }
 
   Widget _buildContent(BuildContext context) {
+    // 📅 일정 잡기 메시지
+    if (msg.scheduleEventId != null && !msg.isDeleted) {
+      return ScheduleCard(
+        eventId: msg.scheduleEventId!,
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ScheduleResponseScreen(
+                eventId: msg.scheduleEventId!,
+              ),
+            ),
+          );
+        },
+      );
+    }
+
+    // 📍 위치 공유 메시지
+    if (msg.locationShareId != null && !msg.isDeleted) {
+      return LocationShareCard(
+        shareId: msg.locationShareId!,
+        onTap: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => LocationShareMapScreen(
+                roomId: roomId,
+                roomType: 'dm',
+                focusShareId: msg.locationShareId,
+              ),
+            ),
+          );
+        },
+      );
+    }
+
     if (msg.pollId != null && !msg.isDeleted) {
       return PollBubble(pollId: msg.pollId!, isMe: isMe);
     }
@@ -266,9 +293,6 @@ class MessageBubble extends StatelessWidget {
           crossAxisAlignment:
               isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
-            // ═══════════════════════════════════════
-            // 답장 미리보기 — 더 세련되게
-            // ═══════════════════════════════════════
             if (msg.replyToContent != null)
               Padding(
                 padding: EdgeInsets.only(
@@ -351,9 +375,6 @@ class MessageBubble extends StatelessWidget {
                 ),
               ),
 
-            // ═══════════════════════════════════════
-            // 버블 + 시간 + 아바타
-            // ═══════════════════════════════════════
             Row(
               mainAxisAlignment: isMe
                   ? MainAxisAlignment.end
@@ -382,7 +403,6 @@ class MessageBubble extends StatelessWidget {
                   ),
                   const SizedBox(width: 7),
                 ],
-                // 내 메시지: 시간을 왼쪽에
                 if (isMe) ...[
                   Padding(
                     padding: const EdgeInsets.only(bottom: 3),
@@ -406,7 +426,6 @@ class MessageBubble extends StatelessWidget {
                     child: _buildContent(context),
                   ),
                 ),
-                // 상대 메시지: 시간을 오른쪽에
                 if (!isMe) ...[
                   const SizedBox(width: 5),
                   Padding(
@@ -424,9 +443,6 @@ class MessageBubble extends StatelessWidget {
               ],
             ),
 
-            // ═══════════════════════════════════════
-            // 리액션 칩
-            // ═══════════════════════════════════════
             Padding(
               padding: EdgeInsets.only(
                 left: isMe ? 0 : 37,

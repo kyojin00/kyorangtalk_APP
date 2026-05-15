@@ -51,6 +51,12 @@ dependencies:
   flutter_callkit_incoming: ^2.5.2
   sentry_flutter: ^9.20.0
   in_app_purchase: ^3.2.0
+  local_auth: ^2.3.0
+  crypto: ^3.0.3
+  geolocator: ^13.0.1
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+  youtube_player_iframe: ^5.2.0
 
 
 dev_dependencies:

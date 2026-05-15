@@ -9,7 +9,9 @@ list(APPEND FLUTTER_PLUGIN_LIST
   firebase_auth
   firebase_core
   gal
+  geolocator_windows
   iris_method_channel
+  local_auth_windows
   permission_handler_windows
   record_windows
   sentry_flutter
