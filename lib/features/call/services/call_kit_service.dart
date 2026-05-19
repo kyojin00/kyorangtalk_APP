@@ -3,6 +3,11 @@
 //
 // 시스템 통화 UI를 띄우는 서비스. flutter_callkit_incoming 래퍼.
 // 잠금화면 / 백그라운드 / 앱 종료 상태에서도 동작.
+//
+// ⭐ 수정 (native decline 의도치 않은 fire 차단 + 살아있음 체크):
+//   - setIncomingScreenActive(bool) 메서드
+//   - incomingScreenActive getter (CallRouter가 재push 판단용으로 사용)
+//   - IncomingCallScreen이 마운트되어 있는 동안 actionCallDecline 이벤트 무시
 // ════════════════════════════════════════════════════════════════
 
 import 'dart:async';
@@ -22,6 +27,16 @@ class CallKitService {
   bool _initialized = false;
 
   final Set<String> _activeCallIds = {};
+
+  bool _incomingScreenActive = false;
+
+  void setIncomingScreenActive(bool active) {
+    _incomingScreenActive = active;
+    print('🔵 [CallKitService] incomingScreenActive = $active');
+  }
+
+  /// CallRouter가 IncomingCallScreen이 살아있는지 확인할 때 사용
+  bool get incomingScreenActive => _incomingScreenActive;
 
   void initialize() {
     if (_initialized) return;
@@ -135,8 +150,6 @@ class CallKitService {
     }
   }
 
-  /// 앱이 종료 상태였다가 통화 받기로 시작된 경우 사용
-  /// (background에서 처리된 통화의 정보를 가져옴)
   Future<CallInvite?> getActiveCall() async {
     try {
       final calls = await FlutterCallkitIncoming.activeCalls();
@@ -157,7 +170,8 @@ class CallKitService {
 
   void _handleEvent(CallEvent? event) async {
     if (event == null) return;
-    print('📞 [CallKit Event] ${event.event}');
+    print('📞 [CallKit Event] ${event.event} '
+        '(incomingScreenActive=$_incomingScreenActive)');
 
     final body = event.body;
     final extra = (body is Map && body['extra'] is Map)
@@ -178,6 +192,10 @@ class CallKitService {
 
       case Event.actionCallDecline:
         _activeCallIds.remove(callId);
+        if (_incomingScreenActive) {
+          print('🟡 [actionCallDecline] suppressed — IncomingCallScreen active');
+          return;
+        }
         onDecline?.call(callId);
         break;
 
@@ -195,10 +213,6 @@ class CallKitService {
     }
   }
 }
-
-// ═══════════════════════════════════════════════════
-// 통화 초대 정보 객체
-// ═══════════════════════════════════════════════════
 
 class CallInvite {
   final String callId;

@@ -35,6 +35,7 @@ import 'group_members_screen.dart';
 import 'group_room_info_screen.dart';
 import '../../location/widgets/location_share_start_sheet.dart';
 import '../../schedule/widgets/schedule_create_sheet.dart';
+import '../../call/widgets/call_return_bubble.dart';
 
 
 class GroupChatRoomScreen extends ConsumerStatefulWidget {
@@ -1167,6 +1168,8 @@ Future<void> _shareSchedule() async {
                 },
               ),
             ),
+
+            CallReturnBubble(roomId: widget.room.id),
 
             if (_replyTo != null && hasAdmin)
               GroupReplyPreview(

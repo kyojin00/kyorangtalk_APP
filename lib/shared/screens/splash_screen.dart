@@ -5,19 +5,18 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/theme/app_theme.dart';
+import '../../features/call/providers/call_provider.dart';
+import '../../features/call/providers/ongoing_call_provider.dart';
 import '../../main.dart';
 
 // ═══════════════════════════════════════════════════
-// 🌟 SplashScreen — 글자 애니메이션 (Google Fonts 적용)
+// 🌟 SplashScreen
 //
-// 흐름:
-//  0.0s  ─ 검정 그라데이션 배경 등장
-//  0.2s  ─ "교" 페이드인
-//  0.7s  ─ "랑" 페이드인 (교 옆에 추가)
-//  1.3s  ─ "교 랑" 유지
-//  1.6s  ─ "교 랑" 페이드아웃 (위로 살짝)
-//  2.0s  ─ "KYORANG" 등장 (Playfair Display, 부드러운 세리프)
-//  2.8s  ─ 메인 이동
+// ⭐ 최종 fix (-17 ERR_JOIN_CHANNEL_REJECTED 해결):
+//   - SplashScreen이 ActiveCallScreen을 push하지 않음
+//   - 대신 ActiveCallScreen이 dispose될 때까지 대기 후 /main으로
+//   - ActiveCallScreen은 IncomingCallScreen 라우트 안에서 widget swap으로만 mount (한 번)
+//   - 사용자 뒤로가기 → ActiveCallScreen widget dispose → SplashScreen이 /main으로 이동
 // ═══════════════════════════════════════════════════
 
 class SplashScreen extends ConsumerStatefulWidget {
@@ -31,13 +30,10 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
     with TickerProviderStateMixin {
   late AnimationController _glowController;
 
-  // 한글 두 글자
-  late AnimationController _gyoController;       // "교"
-  late AnimationController _rangController;      // "랑"
-  late AnimationController _koreanFadeOut;       // 교랑 사라짐
-
-  // 영문
-  late AnimationController _englishController;   // "KYORANG"
+  late AnimationController _gyoController;
+  late AnimationController _rangController;
+  late AnimationController _koreanFadeOut;
+  late AnimationController _englishController;
 
   late Animation<double> _gyoFade;
   late Animation<Offset> _gyoSlide;
@@ -50,6 +46,8 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
   late Animation<double> _englishFade;
   late Animation<double> _englishScale;
 
+  bool _callEverActive = false;
+
   @override
   void initState() {
     super.initState();
@@ -59,7 +57,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
       duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
 
-    // "교" 등장
     _gyoController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 500),
@@ -76,7 +73,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
       curve: Curves.easeOutCubic,
     ));
 
-    // "랑" 등장
     _rangController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 500),
@@ -93,7 +89,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
       curve: Curves.easeOutCubic,
     ));
 
-    // "교 랑" 사라짐
     _koreanFadeOut = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 400),
@@ -112,7 +107,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
       curve: Curves.easeIn,
     ));
 
-    // "KYORANG" 등장
     _englishController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 800),
@@ -169,6 +163,8 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
     final session = supabase.auth.currentSession;
 
     if (session == null) {
+      await _waitForCallFlowToFinish();
+      if (!mounted) return;
       context.go('/login');
       return;
     }
@@ -180,7 +176,10 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
       if (user == null) {
         print('유저가 존재하지 않음, 세션 정리');
         await supabase.auth.signOut();
-        if (mounted) context.go('/login');
+        if (!mounted) return;
+        await _waitForCallFlowToFinish();
+        if (!mounted) return;
+        context.go('/login');
         return;
       }
 
@@ -198,8 +197,17 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
       if (hasProfile) {
         await handlePendingNotification();
         if (!mounted) return;
+
+        // ⭐ 통화 흐름이 끝날 때까지 대기
+        //   - ringing 끝남 (받기/거절 처리)
+        //   - ActiveCallScreen 떴다면 dispose될 때까지 (사용자 뒤로가기 또는 통화 종료)
+        await _waitForCallFlowToFinish();
+        if (!mounted) return;
+
         context.go('/main');
       } else {
+        await _waitForCallFlowToFinish();
+        if (!mounted) return;
         context.go('/onboarding');
       }
     } catch (e) {
@@ -207,16 +215,70 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
       try {
         await supabase.auth.signOut();
       } catch (_) {}
-      if (mounted) context.go('/login');
+      if (!mounted) return;
+      await _waitForCallFlowToFinish();
+      if (!mounted) return;
+      context.go('/login');
+    }
+  }
+
+  /// 통화 흐름이 끝날 때까지 대기
+  /// 1) ringing 통화가 있으면 사라질 때까지 (받기/거절 처리)
+  /// 2) ActiveCallScreen이 뜬 적 있다면 dispose될 때까지
+  Future<void> _waitForCallFlowToFinish() async {
+    // 1) ringing 종료 대기
+    while (mounted) {
+      final incoming = ref.read(incomingCallProvider).valueOrNull;
+      if (incoming == null) break;
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+    if (!mounted) return;
+
+    // 2) ActiveCallScreen 등장 감지 (최대 3초)
+    bool wasEverOnCallScreen = false;
+    final start = DateTime.now();
+    while (mounted &&
+        DateTime.now().difference(start).inMilliseconds < 3000) {
+      if (ref.read(isOnActiveCallScreenProvider)) {
+        wasEverOnCallScreen = true;
+        break;
+      }
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+
+    if (!mounted || !wasEverOnCallScreen) return;
+
+    // 3) ActiveCallScreen dispose 대기 (사용자 뒤로가기 또는 통화 종료까지)
+    while (mounted) {
+      if (!ref.read(isOnActiveCallScreenProvider)) {
+        // 라우트 pop 애니메이션이 끝나도록 약간 대기
+        await Future.delayed(const Duration(milliseconds: 200));
+        return;
+      }
+      await Future.delayed(const Duration(milliseconds: 300));
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final incoming = ref.watch(incomingCallProvider).valueOrNull;
+    final ongoing = ref.watch(myOngoingCallProvider).valueOrNull;
+    final hasCall = incoming != null || ongoing != null;
+
+    if (hasCall) {
+      _callEverActive = true;
+    }
+
+    if (hasCall || _callEverActive) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF080810),
+        body: SizedBox.shrink(),
+      );
+    }
+
     return Scaffold(
       body: Stack(
         children: [
-          // ✨ 그라데이션 배경
           Container(
             decoration: const BoxDecoration(
               gradient: LinearGradient(
@@ -232,7 +294,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
             ),
           ),
 
-          // ✨ 떠다니는 파티클
           AnimatedBuilder(
             animation: _glowController,
             builder: (_, __) {
@@ -244,7 +305,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
             },
           ),
 
-          // ✨ 중앙 글자 애니메이션
           Center(
             child: AnimatedBuilder(
               animation: Listenable.merge([
@@ -259,7 +319,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                 return Stack(
                   alignment: Alignment.center,
                   children: [
-                    // ─── 한글 "교 랑" ───────────────────
                     if (!isKoreanGone)
                       Opacity(
                         opacity: _koreanOutFade.value,
@@ -268,7 +327,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              // "교"
                               FadeTransition(
                                 opacity: _gyoFade,
                                 child: SlideTransition(
@@ -277,7 +335,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                                 ),
                               ),
                               const SizedBox(width: 16),
-                              // "랑"
                               FadeTransition(
                                 opacity: _rangFade,
                                 child: SlideTransition(
@@ -290,7 +347,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
                         ),
                       ),
 
-                    // ─── 영문 "KYORANG" (Playfair Display) ─────
                     if (isKoreanGone || _englishController.value > 0)
                       FadeTransition(
                         opacity: _englishFade,
@@ -325,7 +381,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
             ),
           ),
 
-          // ✨ 하단 워터마크
           Positioned(
             bottom: 50,
             left: 0,
@@ -368,10 +423,6 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
   }
 }
 
-// ═══════════════════════════════════════════════════
-// 🇰🇷 한글 글자 — Noto Serif KR
-// ═══════════════════════════════════════════════════
-
 class _KoreanLetter extends StatelessWidget {
   final String letter;
   const _KoreanLetter(this.letter);
@@ -401,10 +452,6 @@ class _KoreanLetter extends StatelessWidget {
     );
   }
 }
-
-// ═══════════════════════════════════════════════════
-// 떠다니는 파티클
-// ═══════════════════════════════════════════════════
 
 class _ParticlePainter extends CustomPainter {
   final double animation;

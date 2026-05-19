@@ -1,12 +1,10 @@
 // ════════════════════════════════════════════════════════════════
 // 📞 KyorangTalk Call Service
 //
-// Agora RTC Engine 래퍼.
-// Agora SDK 6.x 기준 (agora_rtc_engine: ^6.5.0)
-//
-// ⭐ 웹 지원 추가:
-//   - kIsWeb일 때 permission_handler 우회 (브라우저가 알아서 권한 요청)
-//   - web/index.html에 AgoraRTC SDK 스크립트 필수
+// ⭐ 최적화:
+//   - warmupTokenFunction(): 앱 시작 시 호출 — Edge Function cold start 방지
+//   - prefetchToken(callId): IncomingCallScreen 표시 순간 호출 — 받기 누를 때 토큰 즉시 준비
+//   - 병렬화: 권한 + 토큰 + RPC 동시 실행
 // ════════════════════════════════════════════════════════════════
 
 import 'dart:async';
@@ -15,6 +13,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/call_model.dart';
+import 'call_notification_service.dart';
 
 class CallService {
   CallService._();
@@ -31,6 +30,13 @@ class CallService {
   bool _cameraOff = false;
   bool _speakerOn = false;
   bool _frontCamera = true;
+
+  RealtimeChannel? _callStatusChannel;
+  bool _notificationShown = false;
+
+  // ⭐ 토큰 prefetch 캐시
+  String? _prefetchedCallId;
+  Future<AgoraTokenResponse>? _prefetchedTokenFuture;
 
   RtcEngine? get engine => _engine;
 
@@ -56,18 +62,65 @@ class CallService {
   Timer? _durationTimer;
   DateTime? _callStartTime;
 
-  // ═══════════════════════════════════════════════════
-  // 권한
-  // ═══════════════════════════════════════════════════
-  //
-  // ⭐ 웹에서는 permission_handler가 일부 권한을 항상 denied 반환.
-  //    Agora SDK가 브라우저 권한 다이얼로그를 알아서 띄우므로
-  //    웹에서는 권한 체크를 스킵하고 true 반환.
-  Future<bool> requestPermissions({required bool video}) async {
-    if (kIsWeb) {
-      // 웹: 브라우저가 알아서 처리. 항상 통과.
-      return true;
+  // ════════════════════════════════════════════════
+  // ⭐ Edge Function 웜업
+  // 앱 시작 시 한 번 호출하면 함수가 hot 상태 유지
+  // ════════════════════════════════════════════════
+  Future<void> warmupTokenFunction() async {
+    try {
+      print('🔥 [CallService] Edge Function 웜업 시작');
+      final sw = DateTime.now();
+      // dummy callId로 invoke — 토큰 발급은 실패해도 OK (cold start만 깨움)
+      await _sb.functions
+          .invoke('agora-token', body: {'call_id': '__warmup__'})
+          .timeout(const Duration(seconds: 5), onTimeout: () {
+        throw TimeoutException('warmup timeout');
+      });
+      print('🔥 [CallService] 웜업 완료: ${DateTime.now().difference(sw).inMilliseconds}ms');
+    } catch (e) {
+      // 웜업 실패는 무시 (cold start만 trigger되면 됨)
+      print('🟡 [CallService] 웜업 (오류 무시): $e');
     }
+  }
+
+  // ════════════════════════════════════════════════
+  // ⭐ 토큰 prefetch
+  // IncomingCallScreen이 뜨는 순간 호출 → 받기 누를 때 즉시 사용
+  // ════════════════════════════════════════════════
+  void prefetchToken(String callId) {
+    if (_prefetchedCallId == callId && _prefetchedTokenFuture != null) {
+      print('🔵 [CallService] 이미 prefetch 중: $callId');
+      return;
+    }
+    print('🚀 [CallService] 토큰 prefetch 시작: $callId');
+    _prefetchedCallId = callId;
+    _prefetchedTokenFuture = _fetchToken(callId);
+    _prefetchedTokenFuture!.then((_) {
+      print('🚀 [CallService] 토큰 prefetch 완료');
+    }).catchError((e) {
+      print('🟡 [CallService] prefetch 오류: $e');
+      // 실패 시 캐시 비움 → 다음에 다시 시도
+      if (_prefetchedCallId == callId) {
+        _prefetchedCallId = null;
+        _prefetchedTokenFuture = null;
+      }
+    });
+  }
+
+  /// prefetch된 토큰을 사용하거나 새로 fetch
+  Future<AgoraTokenResponse> _getTokenForCall(String callId) {
+    if (_prefetchedCallId == callId && _prefetchedTokenFuture != null) {
+      print('🚀 [CallService] prefetch된 토큰 사용');
+      final future = _prefetchedTokenFuture!;
+      _prefetchedCallId = null;
+      _prefetchedTokenFuture = null;
+      return future;
+    }
+    return _fetchToken(callId);
+  }
+
+  Future<bool> requestPermissions({required bool video}) async {
+    if (kIsWeb) return true;
 
     final permissions = <Permission>[Permission.microphone];
     if (video) permissions.add(Permission.camera);
@@ -75,10 +128,6 @@ class CallService {
     final results = await permissions.request();
     return results.values.every((s) => s.isGranted);
   }
-
-  // ═══════════════════════════════════════════════════
-  // 통화 시작
-  // ═══════════════════════════════════════════════════
 
   Future<String> startCall({
     required CallRoomType roomType,
@@ -97,23 +146,33 @@ class CallService {
     if (result == null) {
       throw Exception('통화 시작 실패: RPC 응답 없음');
     }
-    return result as String;
-  }
 
-  // ═══════════════════════════════════════════════════
-  // 채널 입장
-  // ═══════════════════════════════════════════════════
+    final callId = result as String;
+
+    // ⭐ 발신자도 callId 받자마자 prefetch (joinChannel 직전이라 효과 적지만 안전)
+    prefetchToken(callId);
+
+    return callId;
+  }
 
   Future<void> joinChannel({
     required String callId,
     required bool isVideo,
   }) async {
-    final ok = await requestPermissions(video: isVideo);
+    final swStart = DateTime.now();
+
+    final permFuture = requestPermissions(video: isVideo);
+    final tokenFuture = _getTokenForCall(callId);
+
+    final results = await Future.wait([permFuture, tokenFuture]);
+    final ok = results[0] as bool;
+    final tokenResp = results[1] as AgoraTokenResponse;
+
     if (!ok) {
       throw Exception('마이크${isVideo ? '/카메라' : ''} 권한이 필요해요');
     }
 
-    final tokenResp = await _fetchToken(callId);
+    print('🔵 [CallService] 권한+토큰 완료: ${DateTime.now().difference(swStart).inMilliseconds}ms');
 
     await _initEngine(
       appId: tokenResp.appId,
@@ -123,6 +182,7 @@ class CallService {
     _isVideoCall = isVideo;
     _currentCallId = callId;
     _myAgoraUid = tokenResp.agoraUid;
+    _notificationShown = false;
 
     await _engine!.joinChannel(
       token: tokenResp.token,
@@ -138,16 +198,15 @@ class CallService {
       ),
     );
 
+    print('🟢 [CallService] joinChannel 완료: ${DateTime.now().difference(swStart).inMilliseconds}ms');
+
     if (isVideo) {
-      try {
-        await _engine!.startPreview();
-      } catch (e) {
+      _engine!.startPreview().catchError((e) {
         print('🟡 startPreview 실패 (무시): $e');
-      }
+        return null;
+      });
     }
 
-    // 채널 입장 직후 setEnableSpeakerphone이 -3 반환할 수 있음
-    // 웹에서는 의미 없으므로 모바일만 시도
     if (!kIsWeb) {
       Future.delayed(const Duration(milliseconds: 300), () async {
         try {
@@ -159,40 +218,114 @@ class CallService {
     }
 
     _startDurationTimer();
+
+    _maybeShowNotificationForCurrentStatus(callId, isVideo);
+    _watchCallStatus(callId, isVideo);
   }
 
-  // ═══════════════════════════════════════════════════
-  // 통화 받기
-  // ═══════════════════════════════════════════════════
+  Future<void> _maybeShowNotificationForCurrentStatus(
+      String callId, bool isVideo) async {
+    try {
+      final row = await _sb
+          .from('kyorangtalk_calls')
+          .select('status')
+          .eq('id', callId)
+          .maybeSingle();
+      final status = row?['status'] as String?;
+      if (status == 'active') {
+        _showCallNotification(callId, isVideo);
+      }
+    } catch (e) {
+      print('🟡 [CallService] status 확인 오류: $e');
+    }
+  }
 
+  // ════════════════════════════════════════════════
+  // ⭐ acceptCall — RPC + 토큰 + 권한 + 엔진 모두 병렬
+  // 토큰은 prefetch 캐시에서 즉시 사용 (가장 큰 단축)
+  // ════════════════════════════════════════════════
   Future<void> acceptCall({
     required String callId,
     required bool isVideo,
   }) async {
-    await _sb.rpc('kyorangtalk_accept_call', params: {'p_call_id': callId});
-    await joinChannel(callId: callId, isVideo: isVideo);
-  }
+    final swStart = DateTime.now();
 
-  // ═══════════════════════════════════════════════════
-  // 통화 거절
-  // ═══════════════════════════════════════════════════
+    final rpcFuture = _sb
+        .rpc('kyorangtalk_accept_call', params: {'p_call_id': callId})
+        .catchError((e) {
+          print('🔴 accept_call RPC 오류: $e');
+          throw e;
+        });
+
+    final permFuture = requestPermissions(video: isVideo);
+    final tokenFuture = _getTokenForCall(callId);
+
+    final results = await Future.wait([rpcFuture, permFuture, tokenFuture]);
+    final ok = results[1] as bool;
+    final tokenResp = results[2] as AgoraTokenResponse;
+
+    if (!ok) {
+      throw Exception('마이크${isVideo ? '/카메라' : ''} 권한이 필요해요');
+    }
+
+    print('🔵 [CallService] accept RPC+권한+토큰 완료: ${DateTime.now().difference(swStart).inMilliseconds}ms');
+
+    await _initEngine(
+      appId: tokenResp.appId,
+      isVideo: isVideo,
+    );
+
+    _isVideoCall = isVideo;
+    _currentCallId = callId;
+    _myAgoraUid = tokenResp.agoraUid;
+    _notificationShown = false;
+
+    await _engine!.joinChannel(
+      token: tokenResp.token,
+      channelId: tokenResp.channel,
+      uid: tokenResp.agoraUid,
+      options: ChannelMediaOptions(
+        channelProfile: ChannelProfileType.channelProfileCommunication,
+        clientRoleType: ClientRoleType.clientRoleBroadcaster,
+        publishMicrophoneTrack: true,
+        publishCameraTrack: isVideo,
+        autoSubscribeAudio: true,
+        autoSubscribeVideo: isVideo,
+      ),
+    );
+
+    print('🟢 [CallService] acceptCall joinChannel 완료: ${DateTime.now().difference(swStart).inMilliseconds}ms');
+
+    if (isVideo) {
+      _engine!.startPreview().catchError((e) {
+        print('🟡 startPreview 실패 (무시): $e');
+        return null;
+      });
+    }
+
+    if (!kIsWeb) {
+      Future.delayed(const Duration(milliseconds: 300), () async {
+        try {
+          await setSpeaker(isVideo);
+        } catch (e) {
+          print('🟡 setSpeaker 실패 (무시): $e');
+        }
+      });
+    }
+
+    _startDurationTimer();
+    _showCallNotification(callId, isVideo);
+    _watchCallStatus(callId, isVideo);
+  }
 
   Future<void> declineCall(String callId) async {
     await _sb.rpc('kyorangtalk_decline_call', params: {'p_call_id': callId});
   }
 
-  // ═══════════════════════════════════════════════════
-  // 통화 취소
-  // ═══════════════════════════════════════════════════
-
   Future<void> cancelCall(String callId) async {
     await _sb.rpc('kyorangtalk_cancel_call', params: {'p_call_id': callId});
     await leaveChannel();
   }
-
-  // ═══════════════════════════════════════════════════
-  // 통화 종료
-  // ═══════════════════════════════════════════════════
 
   Future<void> endCall() async {
     final callId = _currentCallId;
@@ -208,6 +341,21 @@ class CallService {
 
   Future<void> leaveChannel() async {
     _stopDurationTimer();
+
+    if (_callStatusChannel != null) {
+      try {
+        await _sb.removeChannel(_callStatusChannel!);
+      } catch (_) {}
+      _callStatusChannel = null;
+    }
+
+    CallNotificationService.instance.hide();
+    _notificationShown = false;
+
+    // prefetch 캐시 비우기
+    _prefetchedCallId = null;
+    _prefetchedTokenFuture = null;
+
     try {
       if (_engine != null) {
         await _engine!.leaveChannel();
@@ -226,10 +374,6 @@ class CallService {
       _frontCamera = true;
     }
   }
-
-  // ═══════════════════════════════════════════════════
-  // 통화 중 컨트롤
-  // ═══════════════════════════════════════════════════
 
   Future<void> toggleMic() async {
     if (_engine == null) return;
@@ -264,7 +408,6 @@ class CallService {
 
   Future<void> setSpeaker(bool on) async {
     if (_engine == null) return;
-    // 웹에서는 스피커폰 토글이 의미 없음
     if (kIsWeb) {
       _speakerOn = on;
       return;
@@ -281,10 +424,6 @@ class CallService {
     }
   }
 
-  // ═══════════════════════════════════════════════════
-  // 그룹 통화 — 도중 참여
-  // ═══════════════════════════════════════════════════
-
   Future<bool> joinActiveGroupCall({
     required String callId,
     required bool isVideo,
@@ -298,9 +437,119 @@ class CallService {
     return true;
   }
 
-  // ═══════════════════════════════════════════════════
-  // 내부: Agora 엔진 초기화
-  // ═══════════════════════════════════════════════════
+  void _watchCallStatus(String callId, bool isVideo) {
+    if (_callStatusChannel != null) {
+      try {
+        _sb.removeChannel(_callStatusChannel!);
+      } catch (_) {}
+      _callStatusChannel = null;
+    }
+
+    _callStatusChannel = _sb
+        .channel('call_status_watch_$callId')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'kyorangtalk_calls',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'id',
+            value: callId,
+          ),
+          callback: (payload) {
+            final newRow = payload.newRecord;
+            final status = newRow['status'] as String?;
+            print('🔵 [CallService] 통화 상태 변경: $status');
+
+            if (status == 'active' && !_notificationShown) {
+              _showCallNotification(callId, isVideo);
+            }
+
+            if (status == 'ended' ||
+                status == 'declined' ||
+                status == 'cancelled' ||
+                status == 'missed') {
+              print('🟡 [CallService] 통화 종료 감지 → 자동 정리');
+              leaveChannel();
+            }
+          },
+        )
+        .subscribe();
+  }
+
+  Future<void> _showCallNotification(String callId, bool isVideo) async {
+    if (_notificationShown) return;
+    _notificationShown = true;
+    try {
+      final displayName = await _fetchCallDisplayName(callId);
+      await CallNotificationService.instance.show(
+        callId: callId,
+        isVideo: isVideo,
+        displayName: displayName,
+      );
+    } catch (e) {
+      print('🟡 _showCallNotification 오류: $e');
+      _notificationShown = false;
+    }
+  }
+
+  Future<String> _fetchCallDisplayName(String callId) async {
+    try {
+      final call = await _sb
+          .from('kyorangtalk_calls')
+          .select('initiator_id, room_type, source_room_id')
+          .eq('id', callId)
+          .maybeSingle();
+
+      if (call == null) return '통화 중';
+
+      final roomType = call['room_type'] as String?;
+      final myId = _sb.auth.currentUser?.id;
+
+      if (roomType == 'group') {
+        final sourceRoomId = call['source_room_id'] as String?;
+        if (sourceRoomId == null) return '그룹 통화';
+        final room = await _sb
+            .from('kyorangtalk_group_rooms')
+            .select('name')
+            .eq('id', sourceRoomId)
+            .maybeSingle();
+        return room?['name'] as String? ?? '그룹 통화';
+      }
+
+      final initiatorId = call['initiator_id'] as String;
+      final sourceRoomId = call['source_room_id'] as String?;
+
+      String? otherId;
+      if (sourceRoomId != null) {
+        final room = await _sb
+            .from('kyorangtalk_rooms')
+            .select('user1_id, user2_id')
+            .eq('id', sourceRoomId)
+            .maybeSingle();
+
+        if (room != null) {
+          final u1 = room['user1_id'] as String;
+          final u2 = room['user2_id'] as String;
+          otherId = u1 == myId ? u2 : u1;
+        }
+      }
+      otherId ??= initiatorId == myId ? null : initiatorId;
+
+      if (otherId == null) return '통화 중';
+
+      final prof = await _sb
+          .from('kyorangtalk_profiles')
+          .select('nickname')
+          .eq('id', otherId)
+          .maybeSingle();
+
+      return prof?['nickname'] as String? ?? '통화 중';
+    } catch (e) {
+      print('🟡 _fetchCallDisplayName 오류: $e');
+      return '통화 중';
+    }
+  }
 
   Future<void> _initEngine({
     required String appId,
@@ -393,10 +642,6 @@ class CallService {
     await _engine!.enableAudio();
   }
 
-  // ═══════════════════════════════════════════════════
-  // 내부: 토큰 발급
-  // ═══════════════════════════════════════════════════
-
   Future<AgoraTokenResponse> _fetchToken(String callId) async {
     final response = await _sb.functions.invoke(
       'agora-token',
@@ -418,10 +663,6 @@ class CallService {
       throw Exception('토큰 응답 형식 오류: $data');
     }
   }
-
-  // ═══════════════════════════════════════════════════
-  // 내부: 통화 시간 타이머
-  // ═══════════════════════════════════════════════════
 
   void _startDurationTimer() {
     _stopDurationTimer();

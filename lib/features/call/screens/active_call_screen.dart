@@ -1,5 +1,9 @@
 // ════════════════════════════════════════════════════════════════
 // 📞 ActiveCallScreen
+//
+// ⭐ 수정 (한 쪽 끊을 때 알림도 같이 사라지게):
+//   - _exitScreen에서 leaveChannel 호출 (알림 hide 포함)
+//   - deactivate에서 isOnActiveCallScreenProvider=false 설정 (검정 화면 방지)
 // ════════════════════════════════════════════════════════════════
 
 import 'dart:async';
@@ -11,6 +15,7 @@ import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../models/call_model.dart';
 import '../providers/call_provider.dart';
+import '../providers/ongoing_call_provider.dart';
 import '../services/call_service.dart';
 
 class ActiveCallScreen extends ConsumerStatefulWidget {
@@ -50,13 +55,28 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
   String? _otherAvatar;
   String? _groupRoomName;
 
+  String? _sourceRoomId;
+  CallRoomType? _callRoomType;
+
   bool _controlsVisible = true;
   Timer? _hideControlsTimer;
 
   @override
   void initState() {
     super.initState();
-    // ⭐ immersive 모드 제거 — 화면 잘림 원인이었음
+
+    if (_service.isInCall && _service.currentCallId == widget.callId) {
+      _joining = false;
+      _micMuted = _service.micMuted;
+      _cameraOff = _service.cameraOff;
+      _speakerOn = _service.speakerOn;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(isOnActiveCallScreenProvider.notifier).state = true;
+    });
+
     _loadCallContext();
     _setupListeners();
     _joinCall();
@@ -100,6 +120,18 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
   }
 
   Future<void> _joinCall() async {
+    if (_service.isInCall && _service.currentCallId == widget.callId) {
+      print('🟢 [_joinCall] 이미 같은 통화 연결 중 — join 스킵');
+      if (!mounted) return;
+      setState(() {
+        _joining = false;
+        _micMuted = _service.micMuted;
+        _cameraOff = _service.cameraOff;
+        _speakerOn = _service.speakerOn;
+      });
+      return;
+    }
+
     try {
       if (widget.isInitiator) {
         await _service.joinChannel(
@@ -140,15 +172,23 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
 
       final myId = sb.auth.currentUser?.id;
       final roomType = call['room_type'] as String?;
+      final sourceRoomId = call['source_room_id'] as String?;
+
+      if (mounted) {
+        setState(() {
+          _sourceRoomId = sourceRoomId;
+          _callRoomType =
+              roomType == 'dm' ? CallRoomType.dm : CallRoomType.group;
+        });
+      }
 
       if (roomType == 'dm') {
         final initiatorId = call['initiator_id'] as String;
-        final sourceRoomId = call['source_room_id'] as String;
 
         final room = await sb
             .from('kyorangtalk_rooms')
             .select('user1_id, user2_id')
-            .eq('id', sourceRoomId)
+            .eq('id', sourceRoomId ?? '')
             .maybeSingle();
 
         String? otherId;
@@ -176,7 +216,7 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
         final room = await sb
             .from('kyorangtalk_group_rooms')
             .select('name')
-            .eq('id', call['source_room_id'])
+            .eq('id', sourceRoomId ?? '')
             .maybeSingle();
         if (!mounted) return;
         setState(() {
@@ -186,6 +226,10 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
     } catch (e) {
       print('🔴 _loadCallContext 오류: $e');
     }
+  }
+
+  void _onBackPressed() {
+    Navigator.of(context).pop();
   }
 
   void _scheduleHideControls() {
@@ -203,11 +247,21 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
   }
 
   @override
+  void deactivate() {
+    try {
+      ref.read(isOnActiveCallScreenProvider.notifier).state = false;
+      print('🔵 [ActiveCallScreen] deactivate: isOnActiveCallScreenProvider=false');
+    } catch (e) {
+      print('🟡 [ActiveCallScreen] deactivate ref 오류: $e');
+    }
+    super.deactivate();
+  }
+
+  @override
   void dispose() {
     _hideControlsTimer?.cancel();
     _remoteSub?.cancel();
     _durationSub?.cancel();
-    // ⭐ immersive 모드 해제도 제거 (애초에 적용 안 함)
     super.dispose();
   }
 
@@ -240,11 +294,9 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
       canPop: false,
       child: Scaffold(
         backgroundColor: Colors.black,
-        // ⭐ extendBodyBehindAppBar: false (기본값) → 화면 영역이 정상 계산됨
         body: GestureDetector(
           onTap: widget.isVideo ? _showControls : null,
           child: SizedBox(
-            // ⭐ 명시적 fullscreen — 화면 잘림 방지
             width: double.infinity,
             height: double.infinity,
             child: Stack(
@@ -265,7 +317,6 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
     );
   }
 
-  // ─── 영상 뷰 ──────────────────────────────────────
   Widget _buildVideoView() {
     final engine = _getEngine();
 
@@ -352,7 +403,6 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
     );
   }
 
-  // ─── 음성 뷰 ──────────────────────────────────────
   Widget _buildVoiceView() {
     return Container(
       width: double.infinity,
@@ -370,15 +420,15 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
       child: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
-            final reservedTop = 70.0;
-            final reservedBottom = 160.0;
+            const reservedTop = 70.0;
+            const reservedBottom = 160.0;
             final availableHeight =
                 constraints.maxHeight - reservedTop - reservedBottom;
             final avatarSize =
                 (availableHeight * 0.4).clamp(80.0, 140.0);
 
             return Padding(
-              padding: EdgeInsets.only(top: reservedTop),
+              padding: const EdgeInsets.only(top: reservedTop),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.start,
                 crossAxisAlignment: CrossAxisAlignment.center,
@@ -422,6 +472,9 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
   }
 
   String _statusText() {
+    if (_service.isInCall && _service.currentCallId == widget.callId) {
+      return _formatDuration(_durationSec);
+    }
     if (_firstRemoteUid == null) return '호출 중...';
     return _formatDuration(_durationSec);
   }
@@ -432,7 +485,6 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
     return '$m:$s';
   }
 
-  // ─── 상단 바 ──────────────────────────────────────
   Widget _buildTopBar() {
     return Positioned(
       top: 0,
@@ -441,7 +493,8 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
       child: SafeArea(
         bottom: false,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          padding: const EdgeInsets.symmetric(
+              horizontal: 4, vertical: 8),
           decoration: BoxDecoration(
             gradient: widget.isVideo
                 ? LinearGradient(
@@ -456,6 +509,15 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
           ),
           child: Row(
             children: [
+              IconButton(
+                icon: const Icon(
+                  Icons.arrow_back_ios_new_rounded,
+                  color: Colors.white,
+                  size: 22,
+                ),
+                onPressed: _onBackPressed,
+                tooltip: '채팅방으로',
+              ),
               if (widget.isVideo) ...[
                 Flexible(
                   child: Text(
@@ -471,9 +533,7 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
                 ),
                 const SizedBox(width: 12),
                 Text(
-                  _firstRemoteUid == null
-                      ? '연결 중...'
-                      : _formatDuration(_durationSec),
+                  _statusText(),
                   style: TextStyle(
                     color: Colors.white.withOpacity(0.8),
                     fontSize: 13,
@@ -488,7 +548,6 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
     );
   }
 
-  // ─── 하단 컨트롤 ──────────────────────────────────
   Widget _buildBottomControls() {
     final buttons = <Widget>[
       _ControlButton(
@@ -578,7 +637,13 @@ class _ActiveCallScreenState extends ConsumerState<ActiveCallScreen> {
     if (mounted) _exitScreen();
   }
 
+  // ⭐ 통화 종료 시 leaveChannel 호출 (알림 hide 포함)
+  //    상대방이 끊었을 때 activeCallProvider가 종료를 감지하면 여기로 옴
   void _exitScreen() {
+    _service.leaveChannel().catchError((e) {
+      print('🟡 [ActiveCallScreen] _exitScreen leaveChannel 오류: $e');
+    });
+
     if (!mounted) return;
     Navigator.of(context).pop();
   }

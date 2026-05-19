@@ -1,10 +1,11 @@
 // ════════════════════════════════════════════════════════════════
 // 📞 IncomingCallScreen
 //
-// 전화 받는 풀스크린.
-// CallRouter가 ringing 통화 감지 시 자동으로 띄움.
-// 받기 → ActiveCallScreen으로 이동
-// 거절 → 화면 닫힘
+// ⭐ 버그 수정 이력:
+//   v1-v4: navigator 조작 방식 시도 — 모두 실패
+//   v5: 위젯 교체 방식 — 여전히 사라짐 (status=declined 감지 후 exit)
+//   v6: CallKitService.setIncomingScreenActive로 native decline 차단
+//   v7 (current): 토큰 prefetch 추가 — 받기 누를 때 통화 연결 빨라짐
 // ════════════════════════════════════════════════════════════════
 
 import 'dart:async';
@@ -16,6 +17,7 @@ import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../models/call_model.dart';
 import '../providers/call_provider.dart';
+import '../services/call_kit_service.dart';
 import '../services/call_service.dart';
 import 'active_call_screen.dart';
 
@@ -36,12 +38,24 @@ class _IncomingCallScreenState
   String? _roomName;
 
   bool _processing = false;
+  bool _accepted = false;
+  bool _seenRingingCall = false;
+  DateTime? _mountedAt;
 
   late final AnimationController _pulseCtrl;
 
   @override
   void initState() {
     super.initState();
+    _mountedAt = DateTime.now();
+
+    // ⭐⭐⭐ 핵심: native actionCallDecline 차단 ON
+    CallKitService.instance.setIncomingScreenActive(true);
+
+    // ⭐ 토큰 prefetch — 사용자가 받기 누를 때 토큰 즉시 사용
+    //   IncomingCallScreen 떠 있는 동안 백그라운드에서 fetch
+    CallService.instance.prefetchToken(widget.call.id);
+
     _pulseCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1500),
@@ -49,10 +63,22 @@ class _IncomingCallScreenState
 
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersive);
     _loadCallerInfo();
+
+    if (widget.call.status == CallStatus.ringing) {
+      _seenRingingCall = true;
+    }
+
+    print('🔵 [IncomingCall] mounted callId=${widget.call.id} '
+        'status=${widget.call.status.name}');
   }
 
   @override
   void dispose() {
+    print('🔵 [IncomingCall] dispose callId=${widget.call.id}');
+
+    // ⭐⭐⭐ native actionCallDecline 차단 OFF
+    CallKitService.instance.setIncomingScreenActive(false);
+
     _pulseCtrl.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
@@ -61,14 +87,12 @@ class _IncomingCallScreenState
   Future<void> _loadCallerInfo() async {
     final sb = Supabase.instance.client;
     try {
-      // 발신자 프로필
       final profile = await sb
           .from('kyorangtalk_profiles')
           .select('nickname, avatar_url')
           .eq('id', widget.call.initiatorId)
           .maybeSingle();
 
-      // 그룹이면 방 이름도
       String? roomName;
       if (widget.call.roomType == CallRoomType.group) {
         final room = await sb
@@ -90,29 +114,62 @@ class _IncomingCallScreenState
     }
   }
 
+  bool _shouldAutoPop(CallModel? call) {
+    if (_accepted) return false;
+    if (_processing) return false;
+
+    final elapsed = DateTime.now()
+        .difference(_mountedAt ?? DateTime.now())
+        .inMilliseconds;
+    if (elapsed < 1000) return false;
+
+    if (call == null) {
+      if (!_seenRingingCall) return false;
+      print('🔴 [IncomingCall guard] call=null after valid → POP');
+      return true;
+    }
+
+    if (call.status == CallStatus.ringing) {
+      _seenRingingCall = true;
+      return false;
+    }
+
+    if (call.status.isFinished) {
+      print(
+          '🔴 [IncomingCall guard] status=${call.status.name} → POP');
+      return true;
+    }
+
+    return false;
+  }
+
   @override
   Widget build(BuildContext context) {
-    // 통화 상태 listen — 발신자가 취소하거나 통화가 끝나면 자동으로 닫음
     ref.listen<AsyncValue<CallModel?>>(
       activeCallProvider(widget.call.id),
       (prev, next) {
         next.whenData((call) {
           if (!mounted) return;
-          if (call == null) {
-            Navigator.of(context).pop();
-            return;
-          }
-          if (call.status.isFinished) {
+          if (_shouldAutoPop(call)) {
             Navigator.of(context).pop();
           }
         });
       },
     );
 
+    // _accepted=true면 ActiveCallScreen 위젯으로 교체 (Navigator 안 건드림)
+    if (_accepted) {
+      return ActiveCallScreen(
+        callId: widget.call.id,
+        isVideo: widget.call.callType.isVideo,
+        isInitiator: false,
+      );
+    }
+
     final isVideo = widget.call.callType.isVideo;
 
     return PopScope(
-      canPop: false, // 뒤로가기로 닫히지 않게 (반드시 받기/거절 중 하나)
+      canPop: false,
       child: Scaffold(
         body: Container(
           decoration: BoxDecoration(
@@ -130,7 +187,6 @@ class _IncomingCallScreenState
               children: [
                 const SizedBox(height: 40),
 
-                // 통화 유형 표시
                 Text(
                   isVideo ? '영상 통화 수신 중' : '음성 통화 수신 중',
                   style: const TextStyle(
@@ -153,7 +209,6 @@ class _IncomingCallScreenState
 
                 const Spacer(),
 
-                // 아바타 + pulse
                 AnimatedBuilder(
                   animation: _pulseCtrl,
                   builder: (_, child) {
@@ -205,7 +260,6 @@ class _IncomingCallScreenState
 
                 const Spacer(flex: 2),
 
-                // 버튼들
                 Padding(
                   padding: const EdgeInsets.symmetric(
                       horizontal: 40, vertical: 60),
@@ -235,15 +289,18 @@ class _IncomingCallScreenState
     );
   }
 
+  // ════════════════════════════════════════════════
+  // 받기
+  // ════════════════════════════════════════════════
   Future<void> _accept() async {
     if (_processing) return;
     setState(() => _processing = true);
+    print('🔵 [_accept] start callId=${widget.call.id}');
 
     final service = CallService.instance;
     final isVideo = widget.call.callType.isVideo;
 
     try {
-      // 권한
       final ok = await service.requestPermissions(video: isVideo);
       if (!ok) {
         if (!mounted) return;
@@ -255,20 +312,17 @@ class _IncomingCallScreenState
         setState(() => _processing = false);
         return;
       }
+      print('🟢 [_accept] 권한 OK');
 
-      // 받기 화면을 ActiveCallScreen으로 교체
       if (!mounted) return;
-      await Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          fullscreenDialog: true,
-          builder: (_) => ActiveCallScreen(
-            callId: widget.call.id,
-            isVideo: isVideo,
-            isInitiator: false,
-          ),
-        ),
-      );
+
+      print('🟢 [_accept] _accepted=true → build에서 ActiveCallScreen으로 교체');
+      setState(() {
+        _accepted = true;
+        _processing = false;
+      });
     } catch (e) {
+      print('🔴 [_accept] 오류: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('통화 받기 실패: $e')),
@@ -278,13 +332,22 @@ class _IncomingCallScreenState
     }
   }
 
+  // ════════════════════════════════════════════════
+  // 거절
+  // ════════════════════════════════════════════════
   Future<void> _decline() async {
     if (_processing) return;
     setState(() => _processing = true);
+    print('🔵 [_decline] callId=${widget.call.id}');
+
+    try {
+      await CallKitService.instance.endCall(widget.call.id);
+    } catch (_) {}
+
     try {
       await CallService.instance.declineCall(widget.call.id);
     } catch (e) {
-      print('🔴 decline 오류: $e');
+      print('🔴 decline RPC 오류: $e');
     }
     if (mounted) Navigator.of(context).pop();
   }

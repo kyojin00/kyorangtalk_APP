@@ -37,6 +37,7 @@ import '../widgets/failed_message_bubble.dart';
 import '../../polls/widgets/create_poll_sheet.dart';
 import '../../location/widgets/location_share_start_sheet.dart';
 import '../../schedule/widgets/schedule_create_sheet.dart';
+import '../../call/widgets/call_return_bubble.dart';
 
 class ChatRoomScreen extends ConsumerStatefulWidget {
   final ChatRoomModel room;
@@ -1274,6 +1275,8 @@ Future<void> _shareSchedule() async {
                 data: _buildMessageList,
               ),
             ),
+
+            CallReturnBubble(roomId: widget.room.roomId),
 
             if (_replyTo != null && !isAnyBlocked)
               ReplyPreview(

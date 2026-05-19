@@ -5,7 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:go_router/go_router.dart';
-import 'package:sentry_flutter/sentry_flutter.dart';            // ⭐ NEW
+import 'package:sentry_flutter/sentry_flutter.dart';
 import 'app.dart';
 import 'core/config/supabase_config.dart';
 import 'core/notifications/fcm_service.dart';
@@ -13,10 +13,11 @@ import 'core/services/deep_link_service.dart';
 import 'features/call/models/call_model.dart';
 import 'features/call/screens/active_call_screen.dart';
 import 'features/call/services/call_kit_service.dart';
+import 'features/call/services/call_service.dart';
 import 'features/chat/models/chat_room_model.dart';
 import 'features/chat/services/revenuecat_service.dart';
 import 'firebase_options.dart';
-import 'core/security/app_lock_guard.dart';
+
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
@@ -26,60 +27,29 @@ String? pendingSenderId;
 CallInvite? pendingAcceptedCall;
 
 // ⭐⭐⭐ Sentry DSN — 가입 후 발급받은 값으로 교체
-//
-// 위치: Sentry 프로젝트 → Settings → Client Keys (DSN)
-// 형식: https://<key>@<org>.ingest.sentry.io/<project_id>
-//
-// 빈 문자열이면 Sentry 비활성화 (그냥 일반 runApp으로 실행)
-const String _sentryDsn = 'https://744b3e255fa47b21eb265d1fba18f0dc@o4511373790478336.ingest.us.sentry.io/4511373797359616';   // ← 여기에 DSN 붙여넣기
+const String _sentryDsn = 'https://744b3e255fa47b21eb265d1fba18f0dc@o4511373790478336.ingest.us.sentry.io/4511373797359616';
 
 void main() async {
-  // SentryFlutter.init이 자체적으로 ensureInitialized 호출함
-  // 하지만 명시적으로 한 번 더 호출해도 무해
-
-  // ⭐ Sentry로 감싸서 main 실행
-  // DSN이 비어 있으면 일반 모드로 실행
   if (_sentryDsn.isEmpty) {
     await _runWithoutSentry();
   } else {
     await SentryFlutter.init(
       (options) {
         options.dsn = _sentryDsn;
-
-        // 환경 구분 (디버그 vs 프로덕션)
         options.environment = kDebugMode ? 'debug' : 'production';
-
-        // 성능 트레이싱 샘플 비율 (0.0 ~ 1.0)
-        // 1.0이면 모든 트랜잭션 추적 (비용 ↑)
-        // 0.1이면 10%만 추적
         options.tracesSampleRate = kDebugMode ? 1.0 : 0.2;
-
-        // 세션 추적
         options.enableAutoSessionTracking = true;
-
-        // breadcrumb (사용자 액션 흔적) 자동 수집
         options.enableAutoNativeBreadcrumbs = true;
-
-        // ⭐ 사용자 정보 자동 첨부
-        options.sendDefaultPii = false;  // 개인정보 자동 전송 차단
-
-        // 디버그 모드에서는 콘솔에 로그 출력
+        options.sendDefaultPii = false;
         options.debug = kDebugMode;
 
-        // ⭐ 일부 에러 무시 (소음 줄이기)
         options.beforeSend = (event, hint) {
           final exception = event.throwable;
           if (exception != null) {
             final message = exception.toString();
-
-            // Agora 비치명적 에러 무시
             if (message.contains('AgoraRtcException(-3')) return null;
-
-            // 네트워크 일시 단절 무시
             if (message.contains('SocketException')) return null;
             if (message.contains('TimeoutException')) return null;
-
-            // 사용자 취소 무시
             if (message.contains('User canceled')) return null;
           }
           return event;
@@ -89,7 +59,6 @@ void main() async {
         await _initializeApp();
         runApp(
           DefaultAssetBundle(
-            // SentryAssetBundle로 asset 로드도 추적 (선택)
             bundle: SentryAssetBundle(),
             child: const ProviderScope(child: KyorangTalkApp()),
           ),
@@ -160,6 +129,10 @@ Future<void> _initializeApp() async {
     realtimeClientOptions: const RealtimeClientOptions(eventsPerSecond: 40),
   );
 
+  // ⭐ Agora token Edge Function 웜업 (백그라운드, await 안 함)
+  //   cold start 방지 — 통화 시작 시 토큰 발급 빨라짐
+  CallService.instance.warmupTokenFunction();
+
   // RevenueCat
   if (!kIsWeb) {
     try {
@@ -183,18 +156,15 @@ Future<void> _initializeApp() async {
       if (!kIsWeb) {
         await RevenueCatService.login(session!.user.id);
       }
-      // ⭐ Sentry 유저 컨텍스트 등록 (개인정보 최소)
       Sentry.configureScope((scope) {
         scope.setUser(SentryUser(
           id: session!.user.id,
-          // email/username은 sendDefaultPii=false이므로 제외 가능
         ));
       });
     } else if (event == AuthChangeEvent.signedOut) {
       if (!kIsWeb) {
         await RevenueCatService.logout();
       }
-      // 유저 컨텍스트 제거
       Sentry.configureScope((scope) {
         scope.setUser(null);
       });
@@ -224,6 +194,10 @@ Future<void> _initializeApp() async {
       if (activeCall != null) {
         print('🟢 앱 종료 상태에서 통화 받기로 시작: ${activeCall.callId}');
         pendingAcceptedCall = activeCall;
+
+        // ⭐ cold start 케이스에서도 prefetch 즉시 시작
+        //   _handleCallAccept이 호출되기 전에 토큰 미리 받아둠
+        CallService.instance.prefetchToken(activeCall.callId);
       }
 
       print('CallKit 초기화 성공');
@@ -262,6 +236,11 @@ Future<void> _initializeApp() async {
 void _registerCallKitCallbacks() {
   CallKitService.instance.onAccept = (CallInvite invite) {
     print('📞 통화 받기: ${invite.callId}');
+
+    // ⭐ 받기 누르는 순간 즉시 prefetch 시작
+    //   _handleCallAccept이 navigator/auth 대기하는 동안 토큰 fetch 병렬 진행
+    CallService.instance.prefetchToken(invite.callId);
+
     _handleCallAccept(invite);
   };
 
@@ -299,6 +278,9 @@ Future<void> _handleCallAccept(CallInvite invite) async {
     print('🔴 통화 받기 — context 없음');
     return;
   }
+
+  // ⭐ ActiveCallScreen 띄우기 직전에도 prefetch 한 번 더 호출 (중복은 무해)
+  CallService.instance.prefetchToken(invite.callId);
 
   Navigator.of(context, rootNavigator: true).push(
     MaterialPageRoute(

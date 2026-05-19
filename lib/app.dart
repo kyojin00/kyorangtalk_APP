@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/notifications/fcm_service.dart';
-import 'core/security/app_lock_guard.dart';                  // ⭐ NEW
+import 'core/security/app_lock_guard.dart';
 import 'core/theme/app_theme.dart';
 import 'core/theme/theme_provider.dart';
 import 'features/auth/screens/login_screen.dart';
@@ -99,13 +99,12 @@ final routerProvider = Provider<GoRouter>((ref) {
       final uriScheme  = state.uri.scheme;
       final uriHost    = state.uri.host;
 
-      // ⭐ 디버그 로그 (어떤 URI가 들어오는지 확인용)
+      // ⭐ 디버그 로그
       print('🔗 [Router redirect] '
           'matched=$loc | full=$fullPath | '
           'scheme=$uriScheme | host=$uriHost | path=$uriPath');
 
       // ⭐⭐⭐ 딥링크 URI 가로채기
-      // path에 'join' 단어가 들어가거나 scheme/host가 우리 딥링크면 → /main으로
       final isDeepLink =
           uriScheme == 'kyorangtalk' ||
           uriHost == 'open.kyorang.com' ||
@@ -145,13 +144,11 @@ final routerProvider = Provider<GoRouter>((ref) {
     // ⭐ 라우트 매칭 실패 시 (페이지 낫 파운드 예외 가로채기)
     onException: (context, state, router) {
       print('🔗 [Router] onException: ${state.uri}');
-      // 딥링크인지 확인
       final uri = state.uri;
       final isDeepLink = uri.scheme == 'kyorangtalk' ||
           uri.host == 'open.kyorang.com' ||
           uri.path.contains('/join/');
       if (isDeepLink) {
-        // DeepLinkService가 알아서 처리할 거니까 그냥 메인으로
         final session = Supabase.instance.client.auth.currentSession;
         router.go(session != null ? '/main' : '/login');
       } else {
@@ -211,7 +208,11 @@ class KyorangTalkApp extends ConsumerWidget {
         final isDark = brightness == Brightness.dark;
         AppTheme.setDark(isDark);
 
-        // ⭐ CallRouter를 최상위 Stack에 배치 — 어디서든 들어오는 통화 감지
+        // ⭐ Stack 구성 (아래에서 위로 쌓임):
+        //   1) child            — 실제 라우터 화면
+        //   2) CallRouter       — 들어오는 통화 감지 → IncomingCallScreen push
+        //   3) OngoingCallBanner — 통화 중일 때 상단에 떠 있는 복귀 배너
+        //
         // ⭐ AppLockGuard로 감싸서 라이프사이클 가드 (백그라운드 → 잠금)
         return KeyedSubtree(
           key: ValueKey<bool>(isDark),

@@ -15,16 +15,13 @@ import '../models/chat_room_model.dart';
 import '../providers/chat_provider.dart' as provider;
 
 // ═══════════════════════════════════════════════════
-// 💬 ChatListScreen — 리디자인
+// 💬 ChatListScreen
 //
-// 변경:
-// - 헤더: 큰 타이틀 (26pt w900) + 알약 카운트
-// - 검색바: 포커스 효과
-// - 채팅방 카드: 더 부드러운 패딩 + 핀/뮤트 뱃지 개선
-// - 안 읽은 메시지: 그라데이션 배경 + 그림자
-// - 핀된 방: 미묘한 배경 차이
-// - 빈 상태: 일러스트 + CTA
-// - 새 채팅 버튼: FAB 스타일 (오른쪽 상단)
+// ⭐ 실시간 동기화:
+//   - 새 메시지 INSERT → provider invalidate + 배너
+//   - 메시지 UPDATE (is_read 등) → provider invalidate
+//   - 방 정보 변경 → provider invalidate
+//   - 디바운스로 과도한 invalidate 방지
 // ═══════════════════════════════════════════════════
 
 class ChatListScreen extends ConsumerStatefulWidget {
@@ -42,11 +39,16 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
   OverlayEntry? _overlayEntry;
 
   Timer? _uiRefreshTimer;
+  Timer? _invalidateDebouncer;
+
+  // ⭐ 실시간 채널들
+  RealtimeChannel? _messagesChannel;
+  RealtimeChannel? _roomsChannel;
 
   @override
   void initState() {
     super.initState();
-    _listenForIncomingMessages();
+    _subscribeRealtime();
     _searchFocus.addListener(() => setState(() {}));
 
     _uiRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
@@ -54,82 +56,122 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
     });
   }
 
-  void _listenForIncomingMessages() {
-    Supabase.instance.client
-        .channel('inbox_$_myId')
+  // ════════════════════════════════════════════════
+  // ⭐ 실시간 구독 통합
+  // ════════════════════════════════════════════════
+  void _subscribeRealtime() {
+    // 메시지 INSERT / UPDATE 통합
+    _messagesChannel = Supabase.instance.client
+        .channel('chat_list_messages_$_myId')
+        // INSERT: 새 메시지 도착
         .onPostgresChanges(
           event: PostgresChangeEvent.insert,
           schema: 'public',
           table: 'kyorangtalk_messages',
-          callback: (payload) async {
-            final row = payload.newRecord;
-            if (row.isEmpty) return;
-            final senderId = row['sender_id'] as String?;
-            final roomId = row['room_id'] as String?;
-            final content = row['content'] as String? ?? '';
-
-            if (senderId == null) return;
-            if (senderId == _myId) return;
-            if (provider.currentOpenRoomId == roomId) return;
-
-            try {
-              final prefsData = await Supabase.instance.client
-                  .from('kyorangtalk_notification_prefs')
-                  .select(
-                      'notifications_enabled, message_preview_enabled')
-                  .eq('user_id', _myId)
-                  .maybeSingle();
-
-              final notificationsEnabled =
-                  prefsData?['notifications_enabled'] as bool? ?? true;
-              final messagePreviewEnabled =
-                  prefsData?['message_preview_enabled'] as bool? ?? true;
-
-              if (!notificationsEnabled) return;
-
-              final muted =
-                  await NotificationService.isMuted(roomId: roomId);
-              if (muted) return;
-
-              if (!mounted) return;
-
-              final blockCheck = await Supabase.instance.client
-                  .from('kyorangtalk_blocks')
-                  .select('id')
-                  .eq('blocker_id', _myId)
-                  .eq('blocked_id', senderId)
-                  .maybeSingle();
-
-              if (blockCheck != null) return;
-
-              if (!mounted) return;
-
-              final profile = await Supabase.instance.client
-                  .from('kyorangtalk_profiles')
-                  .select('nickname')
-                  .eq('id', senderId)
-                  .maybeSingle();
-
-              if (!mounted) return;
-              final nickname = profile?['nickname'] as String? ?? '누군가';
-              final rooms =
-                  ref.read(provider.chatRoomsProvider).value ?? [];
-              final room =
-                  rooms.where((r) => r.roomId == roomId).firstOrNull;
-
-              if (room != null) {
-                final displayContent = messagePreviewEnabled
-                    ? content
-                    : '새 메시지가 도착했어요';
-
-                _showOverlayNotification(nickname, displayContent, room);
-              }
-            } catch (e) {
-              print('⚠️ 앱 내 알림 처리 실패: $e');
-            }
+          callback: _onMessageInsert,
+        )
+        // UPDATE: is_read 변경, content 수정, is_deleted 등
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'kyorangtalk_messages',
+          callback: (_) {
+            print('🔵 [ChatList] 메시지 UPDATE → 리스트 갱신');
+            _scheduleInvalidate();
           },
         )
         .subscribe();
+
+    // 방 자체 변경 (pin, hidden_by, last_message 등)
+    _roomsChannel = Supabase.instance.client
+        .channel('chat_list_rooms_$_myId')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'kyorangtalk_rooms',
+          callback: (_) {
+            print('🔵 [ChatList] 방 변경 → 리스트 갱신');
+            _scheduleInvalidate();
+          },
+        )
+        .subscribe();
+  }
+
+  // ⭐ 디바운스 invalidate (연속 이벤트 합치기)
+  void _scheduleInvalidate() {
+    _invalidateDebouncer?.cancel();
+    _invalidateDebouncer = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted) return;
+      ref.invalidate(provider.chatRoomsProvider);
+    });
+  }
+
+  // ⭐ 새 메시지 INSERT 핸들러 — 리스트 갱신 + 배너
+  Future<void> _onMessageInsert(PostgresChangePayload payload) async {
+    final row = payload.newRecord;
+    if (row.isEmpty) return;
+
+    final senderId = row['sender_id'] as String?;
+    final roomId = row['room_id'] as String?;
+    final content = row['content'] as String? ?? '';
+
+    if (senderId == null) return;
+
+    // ⭐ 무조건 리스트 갱신 (내 메시지든 상대 메시지든)
+    _scheduleInvalidate();
+
+    if (senderId == _myId) return;
+    if (provider.currentOpenRoomId == roomId) return;
+
+    // 배너 표시 로직
+    try {
+      final prefsData = await Supabase.instance.client
+          .from('kyorangtalk_notification_prefs')
+          .select('notifications_enabled, message_preview_enabled')
+          .eq('user_id', _myId)
+          .maybeSingle();
+
+      final notificationsEnabled =
+          prefsData?['notifications_enabled'] as bool? ?? true;
+      final messagePreviewEnabled =
+          prefsData?['message_preview_enabled'] as bool? ?? true;
+
+      if (!notificationsEnabled) return;
+
+      final muted = await NotificationService.isMuted(roomId: roomId);
+      if (muted) return;
+
+      if (!mounted) return;
+
+      final blockCheck = await Supabase.instance.client
+          .from('kyorangtalk_blocks')
+          .select('id')
+          .eq('blocker_id', _myId)
+          .eq('blocked_id', senderId)
+          .maybeSingle();
+
+      if (blockCheck != null) return;
+      if (!mounted) return;
+
+      final profile = await Supabase.instance.client
+          .from('kyorangtalk_profiles')
+          .select('nickname')
+          .eq('id', senderId)
+          .maybeSingle();
+
+      if (!mounted) return;
+      final nickname = profile?['nickname'] as String? ?? '누군가';
+      final rooms = ref.read(provider.chatRoomsProvider).value ?? [];
+      final room = rooms.where((r) => r.roomId == roomId).firstOrNull;
+
+      if (room != null) {
+        final displayContent =
+            messagePreviewEnabled ? content : '새 메시지가 도착했어요';
+        _showOverlayNotification(nickname, displayContent, room);
+      }
+    } catch (e) {
+      print('⚠️ 앱 내 알림 처리 실패: $e');
+    }
   }
 
   void _showOverlayNotification(
@@ -164,10 +206,21 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
   @override
   void dispose() {
     _uiRefreshTimer?.cancel();
+    _invalidateDebouncer?.cancel();
     _searchController.dispose();
     _searchFocus.dispose();
     _overlayEntry?.remove();
-    Supabase.instance.client.channel('inbox_$_myId').unsubscribe();
+
+    if (_messagesChannel != null) {
+      try {
+        Supabase.instance.client.removeChannel(_messagesChannel!);
+      } catch (_) {}
+    }
+    if (_roomsChannel != null) {
+      try {
+        Supabase.instance.client.removeChannel(_roomsChannel!);
+      } catch (_) {}
+    }
     super.dispose();
   }
 
@@ -381,9 +434,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // ─────────────────────────────────────────
-            // ✨ 헤더 — 큰 타이틀 + 알약 + 새 채팅 버튼
-            // ─────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 18, 16, 12),
               child: Row(
@@ -429,7 +479,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                       ),
                     ),
                   const Spacer(),
-                  // 새 채팅 버튼 — 더 부각된 디자인
                   Material(
                     color: Colors.transparent,
                     child: InkWell(
@@ -481,9 +530,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
               ),
             ),
 
-            // ─────────────────────────────────────────
-            // ✨ 검색바 — 포커스 효과
-            // ─────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
               child: AnimatedContainer(
@@ -534,9 +580,6 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
               ),
             ),
 
-            // ─────────────────────────────────────────
-            // 채팅 목록
-            // ─────────────────────────────────────────
             Expanded(
               child: roomsAsync.when(
                 loading: () => const ChatListSkeleton(),
@@ -563,35 +606,52 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                     );
                   }
 
-                  return ListView.builder(
-                    padding: const EdgeInsets.only(top: 4, bottom: 80),
-                    physics: const BouncingScrollPhysics(),
-                    itemCount: filtered.length,
-                    itemBuilder: (_, i) {
-                      final room = filtered[i];
-                      final isMuted = mutedRooms.contains(room.roomId);
-                      final isUnread = room.unreadCount > 0 && !isMuted;
-
-                      return _ChatRoomTile(
-                        room: room,
-                        isMuted: isMuted,
-                        isUnread: isUnread,
-                        timeLabel: _timeAgo(room.lastTime),
-                        onTap: () {
-                          provider.currentOpenRoomId = room.roomId;
-                          context
-                              .push(
-                                '/main/chat/${room.roomId}',
-                                extra: room,
-                              )
-                              .then((_) {
-                                provider.currentOpenRoomId = null;
-                                ref.invalidate(mutedRoomsProvider);
-                              });
-                        },
-                        onLongPress: () => _showRoomActionSheet(room),
-                      );
+                  return RefreshIndicator(
+                    color: AppTheme.primary,
+                    onRefresh: () async {
+                      ref.invalidate(provider.chatRoomsProvider);
+                      await Future.delayed(
+                          const Duration(milliseconds: 500));
                     },
+                    child: ListView.builder(
+                      padding:
+                          const EdgeInsets.only(top: 4, bottom: 80),
+                      physics: const AlwaysScrollableScrollPhysics(
+                        parent: BouncingScrollPhysics(),
+                      ),
+                      itemCount: filtered.length,
+                      itemBuilder: (_, i) {
+                        final room = filtered[i];
+                        final isMuted =
+                            mutedRooms.contains(room.roomId);
+                        final isUnread =
+                            room.unreadCount > 0 && !isMuted;
+
+                        return _ChatRoomTile(
+                          room: room,
+                          isMuted: isMuted,
+                          isUnread: isUnread,
+                          timeLabel: _timeAgo(room.lastTime),
+                          onTap: () {
+                            provider.currentOpenRoomId = room.roomId;
+                            context
+                                .push(
+                                  '/main/chat/${room.roomId}',
+                                  extra: room,
+                                )
+                                .then((_) {
+                                  provider.currentOpenRoomId = null;
+                                  ref.invalidate(mutedRoomsProvider);
+                                  // ⭐ 채팅방 나올 때 리스트도 갱신
+                                  ref.invalidate(
+                                      provider.chatRoomsProvider);
+                                });
+                          },
+                          onLongPress: () =>
+                              _showRoomActionSheet(room),
+                        );
+                      },
+                    ),
                   );
                 },
               ),
@@ -604,7 +664,7 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
 }
 
 // ═══════════════════════════════════════════════════
-// ✨ 채팅방 타일 — 새 디자인
+// 채팅방 타일
 // ═══════════════════════════════════════════════════
 class _ChatRoomTile extends StatelessWidget {
   final ChatRoomModel room;
@@ -652,7 +712,6 @@ class _ChatRoomTile extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // ─── 아바타 (안 읽음 시 반짝이는 효과)
               Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -676,7 +735,6 @@ class _ChatRoomTile extends StatelessWidget {
                       size: 52,
                     ),
                   ),
-                  // 핀 뱃지
                   if (room.isPinned)
                     Positioned(
                       bottom: -2,
@@ -701,7 +759,6 @@ class _ChatRoomTile extends StatelessWidget {
 
               const SizedBox(width: 14),
 
-              // ─── 이름 + 메시지
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -759,7 +816,6 @@ class _ChatRoomTile extends StatelessWidget {
 
               const SizedBox(width: 8),
 
-              // ─── 시간 + 안 읽은 수
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 mainAxisSize: MainAxisSize.min,
@@ -832,9 +888,6 @@ class _ChatRoomTile extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════
-// ✨ 빈 상태
-// ═══════════════════════════════════════════════════
 class _EmptyState extends StatelessWidget {
   final bool isSearching;
   final String searchQuery;
@@ -914,9 +967,6 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════
-// 에러 상태
-// ═══════════════════════════════════════════════════
 class _ErrorState extends StatelessWidget {
   final VoidCallback onRetry;
 
@@ -971,9 +1021,6 @@ class _ErrorState extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════
-// 채팅방 액션 시트
-// ═══════════════════════════════════════════════════
 class _RoomActionSheet extends StatelessWidget {
   final ChatRoomModel room;
   final bool isMuted;
@@ -1140,9 +1187,6 @@ class _ActionRow extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════
-// 새 채팅 시트 (기존 그대로)
-// ═══════════════════════════════════════════════════
 class _NewChatSheet extends ConsumerStatefulWidget {
   final String myId;
   final void Function(dynamic room, bool isGroup) onChatCreated;
@@ -1625,9 +1669,6 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
   }
 }
 
-// ═══════════════════════════════════════════════════
-// 상단 알림 배너
-// ═══════════════════════════════════════════════════
 class _TopNotificationBanner extends StatefulWidget {
   final String senderName;
   final String content;
