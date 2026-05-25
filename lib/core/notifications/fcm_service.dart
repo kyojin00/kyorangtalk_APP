@@ -4,7 +4,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'notification_service.dart';
 import '../../features/chat/providers/chat_provider.dart' show currentOpenRoomId;
 import '../../features/group_chat/providers/group_chat_provider.dart' show currentOpenGroupRoomId;
-import '../../features/call/services/call_kit_service.dart';   // ⭐ NEW
+import '../../features/call/services/call_kit_service.dart';
 
 // ⭐ 백그라운드 핸들러 — entry point 등록 필수
 @pragma('vm:entry-point')
@@ -28,7 +28,10 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 }
 
 typedef OnNotificationTap = void Function(String roomId, String senderId);
+typedef OnVoiceRoomTap = void Function(String voiceRoomId, String? title);
+
 OnNotificationTap? _onNotificationTap;
+OnVoiceRoomTap? _onVoiceRoomTap;
 
 class FcmService {
   static final _messaging = FirebaseMessaging.instance;
@@ -95,6 +98,17 @@ class FcmService {
       onDidReceiveNotificationResponse: (details) {
         final payload = details.payload;
         if (payload != null) {
+          // ⭐ 보이스 룸 페이로드 처리
+          if (payload.startsWith('voice_room:')) {
+            final parts = payload.substring('voice_room:'.length).split('|');
+            if (parts.isNotEmpty) {
+              final voiceRoomId = parts[0];
+              final title = parts.length > 1 ? parts[1] : null;
+              _onVoiceRoomTap?.call(voiceRoomId, title);
+            }
+            return;
+          }
+          // 일반 메시지 페이로드
           final parts = payload.split('|');
           if (parts.length == 2) {
             _onNotificationTap?.call(parts[0], parts[1]);
@@ -103,7 +117,6 @@ class FcmService {
       },
     );
 
-    // ✨ 모든 채널 등록
     final androidPlugin = _localNotifications
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>();
@@ -129,6 +142,11 @@ class FcmService {
 
   static void setOnNotificationTap(OnNotificationTap callback) {
     _onNotificationTap = callback;
+  }
+
+  // ⭐ NEW: 보이스 룸 푸시 탭 콜백
+  static void setOnVoiceRoomTap(OnVoiceRoomTap callback) {
+    _onVoiceRoomTap = callback;
   }
 
   // ✨ 사용자 알림 설정 조회
@@ -172,9 +190,15 @@ class FcmService {
   }
 
   static Future<void> _handleForegroundMessage(RemoteMessage message) async {
-    // ⭐⭐⭐ 통화 초대 처리 (다른 모든 로직보다 먼저)
+    // ⭐ 통화 초대
     if (message.data['type'] == 'call_invite') {
       await _handleCallInvite(message.data);
+      return;
+    }
+
+    // ⭐ NEW: 보이스 룸 시작
+    if (message.data['type'] == 'voice_room_started') {
+      await _handleVoiceRoomNotification(message);
       return;
     }
 
@@ -273,7 +297,6 @@ class FcmService {
       return;
     }
 
-    // 차단 확인 (서버에서도 체크하지만 클라이언트에서도 한 번 더)
     try {
       final supabase = Supabase.instance.client;
       final myId = supabase.auth.currentUser?.id;
@@ -295,7 +318,6 @@ class FcmService {
 
     print('📞 통화 초대 수신: ${invite.callerName} (${invite.callId})');
 
-    // 시스템 통화 UI 표시
     await CallKitService.instance.showIncomingCall(
       callId:       invite.callId,
       callerName:   invite.callerName,
@@ -308,11 +330,123 @@ class FcmService {
     );
   }
 
+  // ⭐ NEW: 보이스 룸 시작 푸시 처리
+  static Future<void> _handleVoiceRoomNotification(
+      RemoteMessage message) async {
+    final voiceRoomId = message.data['voice_room_id'] ?? '';
+    final groupRoomId = message.data['group_room_id'] ?? '';
+    final hostName = message.data['host_name'] ?? '누군가';
+    final groupName = message.data['group_name'] ?? '';
+    final initiatorId = message.data['host_user_id'] ?? '';
+
+    if (voiceRoomId.isEmpty) {
+      print('🔴 보이스 룸 푸시: voice_room_id 없음');
+      return;
+    }
+
+    // 전역 알림 설정 확인
+    final prefs = await _loadNotificationPrefs();
+    if (!prefs['notifications_enabled']!) {
+      print('🔕 전역 알림 꺼짐 - 보이스 룸 푸시 차단');
+      return;
+    }
+
+    // 그룹 방 음소거 확인
+    if (groupRoomId.isNotEmpty) {
+      final isMuted =
+          await NotificationService.isMuted(groupRoomId: groupRoomId);
+      if (isMuted) {
+        print('🔕 그룹 음소거 - 보이스 룸 푸시 차단');
+        return;
+      }
+    }
+
+    // 차단된 사용자인지 확인
+    try {
+      final supabase = Supabase.instance.client;
+      final myId = supabase.auth.currentUser?.id;
+      if (myId != null && initiatorId.isNotEmpty) {
+        final blocked = await supabase
+            .from('kyorangtalk_blocks')
+            .select('id')
+            .eq('blocker_id', myId)
+            .eq('blocked_id', initiatorId)
+            .maybeSingle();
+        if (blocked != null) {
+          print('🚫 차단된 사용자의 보이스 룸 - 무시');
+          return;
+        }
+      }
+    } catch (_) {}
+
+    print('🎙️ 보이스 룸 푸시: $hostName ($voiceRoomId)');
+
+    // 소리/진동 설정
+    final soundOn = prefs['sound_enabled']!;
+    final vibrationOn = prefs['vibration_enabled']!;
+
+    AndroidNotificationChannel channel;
+    if (soundOn && vibrationOn) {
+      channel = _androidChannelWithSound;
+    } else if (soundOn && !vibrationOn) {
+      channel = _androidChannelSoundOnly;
+    } else if (!soundOn && vibrationOn) {
+      channel = _androidChannelVibrationOnly;
+    } else {
+      channel = _androidChannelSilent;
+    }
+
+    final title = groupName.isNotEmpty
+        ? '$groupName · 보이스 룸 시작'
+        : '보이스 룸 시작';
+    final body = '$hostName 님이 보이스 룸을 시작했어요. 탭해서 참여하세요.';
+
+    // payload 형식: "voice_room:{voiceRoomId}|{groupName}"
+    final payload = 'voice_room:$voiceRoomId|$groupName';
+
+    _localNotifications.show(
+      voiceRoomId.hashCode,
+      title,
+      body,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          channel.id,
+          channel.name,
+          channelDescription: channel.description,
+          importance: Importance.max,
+          priority: Priority.high,
+          icon: '@mipmap/ic_launcher',
+          playSound: soundOn,
+          enableVibration: vibrationOn,
+          sound: soundOn
+              ? const RawResourceAndroidNotificationSound('default')
+              : null,
+        ),
+        iOS: DarwinNotificationDetails(
+          presentSound: soundOn,
+          sound: soundOn ? 'default' : null,
+        ),
+      ),
+      payload: payload,
+    );
+  }
+
   static void _handleNotificationTap(RemoteMessage message) {
-    // 통화 초대는 별도 핸들러에서 처리 (시스템 UI에서 받기/거절)
+    // 통화 초대는 별도 핸들러에서 처리
     if (message.data['type'] == 'call_invite') {
-      // FCM에서 직접 탭한 경우 (백그라운드/종료에서 알림 탭)
-      // → CallKit이 이미 띄웠을 거고, 거기서 받기 누르면 onAccept 호출됨
+      return;
+    }
+
+    // ⭐ NEW: 보이스 룸 시작 푸시 탭
+    if (message.data['type'] == 'voice_room_started') {
+      final voiceRoomId = message.data['voice_room_id'] ?? '';
+      final groupName = message.data['group_name'] ?? '';
+      if (voiceRoomId.isNotEmpty) {
+        _onVoiceRoomTap?.call(
+          voiceRoomId,
+          groupName.isNotEmpty ? groupName : null,
+        );
+      }
       return;
     }
 

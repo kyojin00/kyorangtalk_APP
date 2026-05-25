@@ -12,12 +12,20 @@ import '../../main.dart';
 // ═══════════════════════════════════════════════════
 // 🌟 SplashScreen
 //
-// ⭐ 최종 fix (-17 ERR_JOIN_CHANNEL_REJECTED 해결):
-//   - SplashScreen이 ActiveCallScreen을 push하지 않음
-//   - 대신 ActiveCallScreen이 dispose될 때까지 대기 후 /main으로
-//   - ActiveCallScreen은 IncomingCallScreen 라우트 안에서 widget swap으로만 mount (한 번)
-//   - 사용자 뒤로가기 → ActiveCallScreen widget dispose → SplashScreen이 /main으로 이동
+// ⭐ 속도 최적화:
+//   - 기존: 2.8초 강제 대기 + 통화 없을 때도 3초 폴링 = ~6초+
+//   - 변경: 800ms 최소 표시 + 통화 없으면 즉시 통과 = ~800ms
+//   - 인증 체크는 라우터 redirect에 위임 (중복 제거)
+//
+// 디자인 vs 속도 trade-off:
+//   _kMinDisplayMs를 조정해서 균형 맞춤
+//   - 0    = 카톡식 (네이티브 스플래시 끝나자마자 친구 화면)
+//   - 400  = 한글 글자만 살짝 보이고 사라짐
+//   - 800  = 한글 → 영어 전환 시작 (기본값)
+//   - 1500 = 한글 → 영어 전환 완료 (전체 애니메이션)
 // ═══════════════════════════════════════════════════
+
+const int _kMinDisplayMs = 800;
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -127,19 +135,19 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
   }
 
   Future<void> _runAnimation() async {
-    await Future.delayed(const Duration(milliseconds: 200));
+    await Future.delayed(const Duration(milliseconds: 100));
     if (!mounted) return;
     _gyoController.forward();
 
-    await Future.delayed(const Duration(milliseconds: 500));
+    await Future.delayed(const Duration(milliseconds: 300));
     if (!mounted) return;
     _rangController.forward();
 
-    await Future.delayed(const Duration(milliseconds: 700));
+    await Future.delayed(const Duration(milliseconds: 500));
     if (!mounted) return;
     _koreanFadeOut.forward();
 
-    await Future.delayed(const Duration(milliseconds: 400));
+    await Future.delayed(const Duration(milliseconds: 300));
     if (!mounted) return;
     _englishController.forward();
   }
@@ -154,91 +162,57 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
     super.dispose();
   }
 
+  // ⭐ 변경: 강제 2.8초 대기 제거, 라우터 redirect에 인증 체크 위임
   Future<void> _navigate() async {
-    await Future.delayed(const Duration(milliseconds: 2800));
-
+    // 최소 표시 시간만 유지 (디자인 vs 속도 균형)
+    await Future.delayed(const Duration(milliseconds: _kMinDisplayMs));
     if (!mounted) return;
 
-    final supabase = Supabase.instance.client;
-    final session = supabase.auth.currentSession;
+    // 통화 흐름 대기 (통화 없으면 즉시 통과 ← 핵심)
+    await _waitForCallFlowToFinish();
+    if (!mounted) return;
 
-    if (session == null) {
-      await _waitForCallFlowToFinish();
-      if (!mounted) return;
-      context.go('/login');
-      return;
-    }
-
+    // pending 알림 처리 (있을 때만 빠르게)
     try {
-      final userResponse = await supabase.auth.getUser();
-      final user = userResponse.user;
-
-      if (user == null) {
-        print('유저가 존재하지 않음, 세션 정리');
-        await supabase.auth.signOut();
-        if (!mounted) return;
-        await _waitForCallFlowToFinish();
-        if (!mounted) return;
-        context.go('/login');
-        return;
-      }
-
-      final data = await supabase
-          .from('kyorangtalk_profiles')
-          .select('id, nickname')
-          .eq('id', user.id)
-          .maybeSingle();
-
-      if (!mounted) return;
-
-      final hasProfile = data != null &&
-          (data['nickname'] as String?)?.isNotEmpty == true;
-
-      if (hasProfile) {
-        await handlePendingNotification();
-        if (!mounted) return;
-
-        // ⭐ 통화 흐름이 끝날 때까지 대기
-        //   - ringing 끝남 (받기/거절 처리)
-        //   - ActiveCallScreen 떴다면 dispose될 때까지 (사용자 뒤로가기 또는 통화 종료)
-        await _waitForCallFlowToFinish();
-        if (!mounted) return;
-
-        context.go('/main');
-      } else {
-        await _waitForCallFlowToFinish();
-        if (!mounted) return;
-        context.go('/onboarding');
-      }
+      await handlePendingNotification();
     } catch (e) {
-      print('스플래시 오류: $e');
-      try {
-        await supabase.auth.signOut();
-      } catch (_) {}
-      if (!mounted) return;
-      await _waitForCallFlowToFinish();
-      if (!mounted) return;
-      context.go('/login');
+      print('pending notification 처리 오류: $e');
     }
+    if (!mounted) return;
+
+    // 라우터 redirect가 알아서 처리:
+    //   - 세션 없음 → /login
+    //   - 프로필 없음 → /onboarding
+    //   - 정상 → /main
+    final session = Supabase.instance.client.auth.currentSession;
+    context.go(session != null ? '/main' : '/login');
   }
 
   /// 통화 흐름이 끝날 때까지 대기
-  /// 1) ringing 통화가 있으면 사라질 때까지 (받기/거절 처리)
-  /// 2) ActiveCallScreen이 뜬 적 있다면 dispose될 때까지
+  /// ⭐ 변경: 통화 흔적이 전혀 없으면 즉시 종료 (3초 폴링 헛돎 제거)
   Future<void> _waitForCallFlowToFinish() async {
+    // ⭐ 빠른 종료: 통화 흔적이 전혀 없으면 즉시 통과
+    //   대부분의 일반적인 앱 시작 경우 여기서 즉시 return
+    final incoming = ref.read(incomingCallProvider).valueOrNull;
+    final ongoing = ref.read(myOngoingCallProvider).valueOrNull;
+    if (incoming == null && ongoing == null && !_callEverActive) {
+      return;
+    }
+
     // 1) ringing 종료 대기
     while (mounted) {
-      final incoming = ref.read(incomingCallProvider).valueOrNull;
-      if (incoming == null) break;
+      final cur = ref.read(incomingCallProvider).valueOrNull;
+      if (cur == null) break;
       await Future.delayed(const Duration(milliseconds: 300));
     }
     if (!mounted) return;
 
-    // 2) ActiveCallScreen 등장 감지 (최대 3초)
+    // 2) ActiveCallScreen 등장 감지 (3초 → 500ms로 축소)
+    //   여기까지 왔으면 통화 흔적이 있는 상태이므로 짧게 폴링
     bool wasEverOnCallScreen = false;
     final start = DateTime.now();
     while (mounted &&
-        DateTime.now().difference(start).inMilliseconds < 3000) {
+        DateTime.now().difference(start).inMilliseconds < 500) {
       if (ref.read(isOnActiveCallScreenProvider)) {
         wasEverOnCallScreen = true;
         break;
@@ -248,10 +222,9 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
 
     if (!mounted || !wasEverOnCallScreen) return;
 
-    // 3) ActiveCallScreen dispose 대기 (사용자 뒤로가기 또는 통화 종료까지)
+    // 3) ActiveCallScreen dispose 대기
     while (mounted) {
       if (!ref.read(isOnActiveCallScreenProvider)) {
-        // 라우트 pop 애니메이션이 끝나도록 약간 대기
         await Future.delayed(const Duration(milliseconds: 200));
         return;
       }

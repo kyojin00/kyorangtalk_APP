@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../chat/services/message_cache_service.dart';
 import '../models/group_room_model.dart';
 import '../models/group_message_model.dart';
 
@@ -9,11 +10,13 @@ final _supabase = Supabase.instance.client;
 
 String? currentOpenGroupRoomId;
 
-// ═══════════════════════════════════════════════
-// 페이지네이션 설정
-// ═══════════════════════════════════════════════
 const int kInitialGroupMessageLimit = 50;
 const int kMoreGroupMessageLimit = 50;
+
+// ⭐ Prefetch 설정
+const int kPrefetchGroupTopN = 7;
+const Duration kPrefetchGroupFreshness = Duration(minutes: 1);
+final Set<String> _prefetchGroupInFlight = {};
 
 // ═══════════════════════════════════════════════
 // 프로필 캐시 (메모리, 방 단위)
@@ -29,9 +32,6 @@ _ProfileCache _getCache(String roomId) {
   return _roomProfileCaches.putIfAbsent(roomId, () => _ProfileCache());
 }
 
-// ═══════════════════════════════════════════════
-// ⭐ #2: 내 sub_profile_id 캐시 (방 단위)
-// ═══════════════════════════════════════════════
 final Map<String, String?> _mySubProfileCache = {};
 final Map<String, bool> _mySubProfileResolved = {};
 
@@ -40,9 +40,6 @@ void invalidateMySubProfileCache(String roomId) {
   _mySubProfileResolved.remove(roomId);
 }
 
-// ═══════════════════════════════════════════════
-// 페이지네이션 컨트롤러
-// ═══════════════════════════════════════════════
 class _GroupRoomMessageController {
   final String roomId;
   final StreamController<List<GroupMessageModel>> stream;
@@ -64,15 +61,87 @@ class _GroupRoomMessageController {
 final Map<String, _GroupRoomMessageController> _activeGroupControllers = {};
 
 // ═══════════════════════════════════════════════
+// ⭐ Prefetch (앱 시작 시 백그라운드 사전 로드)
+// ═══════════════════════════════════════════════
+void prefetchTopGroupRooms(List<GroupRoomModel> rooms) {
+  for (final room in rooms.take(kPrefetchGroupTopN)) {
+    _prefetchGroupMessages(room.id);
+  }
+}
+
+Future<void> _prefetchGroupMessages(String roomId) async {
+  if (_prefetchGroupInFlight.contains(roomId)) return;
+  if (_activeGroupControllers.containsKey(roomId)) return;
+
+  final existing = MessageCacheService.loadGroup(roomId);
+  if (existing != null &&
+      DateTime.now().difference(existing.savedAt) <
+          kPrefetchGroupFreshness) {
+    return;
+  }
+
+  _prefetchGroupInFlight.add(roomId);
+  try {
+    final result =
+        await _loadInitialGroupMessages(roomId, kInitialGroupMessageLimit);
+
+    await MessageCacheService.saveGroup(
+      roomId: roomId,
+      messages: result.messages,
+      joinedAt: result.joinedAt,
+      hasMore: result.hasMore,
+    );
+    print('✅ [prefetchGroup] $roomId (${result.messages.length}개)');
+  } catch (e) {
+    print('🔴 [prefetchGroup] 실패 ($roomId): $e');
+  } finally {
+    _prefetchGroupInFlight.remove(roomId);
+  }
+}
+
+// ═══════════════════════════════════════════════
+// ⭐ 실시간 캐시 갱신
+// 사용자가 그 방을 안 보고 있어도 새 메시지가 오면 캐시에 추가
+// ═══════════════════════════════════════════════
+Future<void> _appendToGroupCache(
+    String roomId, Map<String, dynamic> newRow) async {
+  if (_activeGroupControllers.containsKey(roomId)) return;
+
+  final existing = MessageCacheService.loadGroup(roomId);
+  if (existing == null) return; // prefetch 안 된 방은 skip
+
+  try {
+    final msg = await _enrichSingleMessage(roomId, newRow);
+    if (msg == null) return;
+
+    // joined_at 이전 메시지는 skip
+    if (existing.joinedAt != null &&
+        msg.createdAt.isBefore(existing.joinedAt!)) {
+      return;
+    }
+
+    if (existing.messages.any((m) => m.id == msg.id)) return;
+
+    final updated = [...existing.messages, msg];
+    await MessageCacheService.saveGroup(
+      roomId: roomId,
+      messages: updated,
+      joinedAt: existing.joinedAt,
+      hasMore: existing.hasMore,
+    );
+  } catch (e) {
+    print('🔴 [_appendToGroupCache] $roomId: $e');
+  }
+}
+
+// ═══════════════════════════════════════════════
 // 내가 참여한 그룹/오픈 채팅 목록 (실시간)
-//
-// ⭐ 최적화 (2026-05):
-//   - unread count: 클라이언트 계산 → RPC로 DB에서 처리
-//   - 네트워크 트래픽 감소, 응답 속도 ↑
 // ═══════════════════════════════════════════════
 final groupRoomsProvider = StreamProvider<List<GroupRoomModel>>((ref) {
   final user = _supabase.auth.currentUser!;
   final controller = StreamController<List<GroupRoomModel>>();
+
+  bool didPrefetch = false; // ⭐ NEW
 
   Future<List<GroupRoomModel>> fetchRooms() async {
     try {
@@ -94,19 +163,17 @@ final groupRoomsProvider = StreamProvider<List<GroupRoomModel>>((ref) {
           m['room_id'] as String: m['joined_at'] as String
       };
 
-      // ⭐ 병렬 처리: 방 정보 + unread count (RPC)
-    // ⭐ 병렬 처리: 방 정보 + unread count (RPC)
-          final parallelResults = await Future.wait<dynamic>([
-            _supabase
-                .from('kyorangtalk_group_rooms')
-                .select('*')
-                .inFilter('id', roomIds)
-                .order('last_message_at', ascending: false),
-            _supabase.rpc('get_group_unread_counts', params: {
-              'p_user_id': user.id,
-              'p_room_ids': roomIds,
-            }),
-          ]);
+      final parallelResults = await Future.wait<dynamic>([
+        _supabase
+            .from('kyorangtalk_group_rooms')
+            .select('*')
+            .inFilter('id', roomIds)
+            .order('last_message_at', ascending: false),
+        _supabase.rpc('get_group_unread_counts', params: {
+          'p_user_id': user.id,
+          'p_room_ids': roomIds,
+        }),
+      ]);
 
       final rooms = parallelResults[0] as List;
       final unreadList = parallelResults[1] as List;
@@ -169,6 +236,12 @@ final groupRoomsProvider = StreamProvider<List<GroupRoomModel>>((ref) {
   fetchRooms().then((data) {
     print('✅ 초기 fetchRooms 완료: ${data.length}개 방');
     if (!controller.isClosed) controller.add(data);
+
+    // ⭐ NEW: 첫 fetch 후 상위 N개 방 백그라운드 사전 로드
+    if (!didPrefetch && data.isNotEmpty) {
+      didPrefetch = true;
+      prefetchTopGroupRooms(data);
+    }
   });
 
   Timer? refetchTimer;
@@ -214,7 +287,17 @@ final groupRoomsProvider = StreamProvider<List<GroupRoomModel>>((ref) {
         event: PostgresChangeEvent.insert,
         schema: 'public',
         table: 'kyorangtalk_group_messages',
-        callback: (_) => scheduleRefetch('messages INSERT'),
+        callback: (payload) {
+          final row = payload.newRecord;
+          if (row.isNotEmpty) {
+            // ⭐ NEW: 화면 안 열려 있는 방의 캐시에 새 메시지 자동 추가
+            final roomId = row['room_id'] as String?;
+            if (roomId != null) {
+              _appendToGroupCache(roomId, row);
+            }
+          }
+          scheduleRefetch('messages INSERT');
+        },
       )
       .subscribe();
 
@@ -478,9 +561,6 @@ Future<bool> toggleRoomLike(String roomId) async {
   }
 }
 
-// ═══════════════════════════════════════════════
-// 내 sub_profile_id — 캐시
-// ═══════════════════════════════════════════════
 Future<String?> getMySubProfileInRoom(String roomId) async {
   if (_mySubProfileResolved[roomId] == true) {
     return _mySubProfileCache[roomId];
@@ -537,11 +617,44 @@ final groupMessagesProvider =
   final ctrl = _GroupRoomMessageController(roomId, streamController);
   _activeGroupControllers[roomId] = ctrl;
 
-  _loadInitialGroupMessages(roomId, kInitialGroupMessageLimit).then((result) {
-    ctrl.messages = result.messages;
-    ctrl.joinedAt = result.joinedAt;
-    ctrl.hasMore = result.hasMore;
+  // ⭐ ① 디스크 캐시(Hive)에 스냅샷이 있으면 즉시 복원
+  final snapshot = MessageCacheService.loadGroup(roomId);
+  final hasCachedData = snapshot != null;
+  if (hasCachedData) {
+    ctrl.messages = List.of(snapshot.messages);
+    ctrl.joinedAt = snapshot.joinedAt;
+    ctrl.hasMore = snapshot.hasMore;
     ctrl.emit();
+    print('⚡ [groupMessages] 스냅샷 복원: $roomId '
+        '(${snapshot.messages.length}개, '
+        '${DateTime.now().difference(snapshot.savedAt).inSeconds}s 전)');
+  }
+
+  // ⭐ ② 백그라운드로 fresh 데이터 fetch + 머지
+  _loadInitialGroupMessages(roomId, kInitialGroupMessageLimit)
+      .then((result) {
+    if (streamController.isClosed) return;
+
+    if (hasCachedData) {
+      final existingIds = ctrl.messages.map((m) => m.id).toSet();
+      final newOnes = result.messages
+          .where((m) => !existingIds.contains(m.id))
+          .toList();
+
+      if (newOnes.isNotEmpty) {
+        ctrl.messages = [...ctrl.messages, ...newOnes];
+        print('⚡ [groupMessages] 머지: $roomId (+${newOnes.length}개)');
+      }
+      ctrl.joinedAt = result.joinedAt;
+      ctrl.emit();
+    } else {
+      ctrl.messages = result.messages;
+      ctrl.joinedAt = result.joinedAt;
+      ctrl.hasMore = result.hasMore;
+      ctrl.emit();
+    }
+  }).catchError((e) {
+    print('🔴 [groupMessages] 초기 로드 실패: $e');
   });
 
   final channel = _supabase
@@ -583,7 +696,8 @@ final groupMessagesProvider =
           final id = updated['id'] as String?;
           final isDeleted = updated['is_deleted'] as bool? ?? false;
           final transcript = updated['audio_transcript'] as String?;
-          final transcriptStatus = updated['audio_transcript_status'] as String?;
+          final transcriptStatus =
+              updated['audio_transcript_status'] as String?;
           if (id == null) return;
           ctrl.messages = ctrl.messages.map((m) {
             if (m.id == id) {
@@ -611,8 +725,8 @@ final groupMessagesProvider =
                 fileName:              m.fileName,
                 fileSize:              m.fileSize,
                 fileType:              m.fileType,
-                locationShareId:       m.locationShareId,       // 📍
-                scheduleEventId:       m.scheduleEventId,       // 📅
+                locationShareId:       m.locationShareId,
+                scheduleEventId:       m.scheduleEventId,
               );
             }
             return m;
@@ -623,11 +737,16 @@ final groupMessagesProvider =
       .subscribe();
 
   ref.onDispose(() {
+    MessageCacheService.saveGroup(
+      roomId: roomId,
+      messages: ctrl.messages,
+      joinedAt: ctrl.joinedAt,
+      hasMore: ctrl.hasMore,
+    );
+
     _supabase.removeChannel(channel);
     streamController.close();
     _activeGroupControllers.remove(roomId);
-    _roomProfileCaches.remove(roomId);
-    invalidateMySubProfileCache(roomId);
   });
 
   return streamController.stream;
@@ -640,18 +759,11 @@ class _InitialLoadResult {
   _InitialLoadResult(this.messages, this.joinedAt, this.hasMore);
 }
 
-// ⭐ 최적화 (2026-05):
-//   - member 조회 + 메시지 조회를 Future.wait로 병렬 처리
-//   - joined_at 필터를 클라이언트에서 적용 (member 결과 받은 후)
 Future<_InitialLoadResult> _loadInitialGroupMessages(
     String roomId, int limit) async {
   final user = _supabase.auth.currentUser;
   if (user == null) return _InitialLoadResult([], null, false);
 
-  // ⭐ 병렬 처리: 멤버 정보 + 메시지 limit*2 가져오기
-  //   member 조회가 끝나기 전에 메시지부터 가져오기 시작
-  //   joined_at 필터는 결과 받은 후 클라이언트에서 적용
-  //   (대부분의 경우 joined_at 이후가 limit개 안에 들어옴)
   final results = await Future.wait<dynamic>([
     _supabase
         .from('kyorangtalk_group_members')
@@ -678,7 +790,6 @@ Future<_InitialLoadResult> _loadInitialGroupMessages(
     _mySubProfileResolved[roomId] = true;
   }
 
-  // ⭐ joined_at 이전 메시지 필터링 (클라이언트)
   if (joinedAt != null) {
     msgs = msgs.where((m) {
       final createdAt = DateTime.parse(m['created_at'] as String);
@@ -686,8 +797,6 @@ Future<_InitialLoadResult> _loadInitialGroupMessages(
     }).toList();
   }
 
-  // ⭐ 필터링 후 메시지가 적으면 다시 가져옴 (joined_at gte로)
-  //   드물게 발생하는 케이스 (오래된 방에 최근 가입)
   if (joinedAt != null && msgs.length < limit) {
     final refetched = await _supabase
         .from('kyorangtalk_group_messages')
@@ -946,8 +1055,8 @@ Future<void> sendGroupMessage({
   String? fileName,
   int? fileSize,
   String? fileType,
-  String? locationShareId,                  // 📍
-  String? scheduleEventId,                  // 📅
+  String? locationShareId,
+  String? scheduleEventId,
 }) async {
   final subProfileId = await getMySubProfileInRoom(roomId);
 
@@ -990,8 +1099,8 @@ Future<void> sendGroupMessage({
     if (fileName != null)        'file_name':         fileName,
     if (fileSize != null)        'file_size':         fileSize,
     if (fileType != null)        'file_type':         fileType,
-    if (locationShareId != null) 'location_share_id': locationShareId,    // 📍
-    if (scheduleEventId != null) 'schedule_event_id': scheduleEventId,    // 📅
+    if (locationShareId != null) 'location_share_id': locationShareId,
+    if (scheduleEventId != null) 'schedule_event_id': scheduleEventId,
   });
 
   String lastMessageText;
@@ -1275,6 +1384,9 @@ Future<void> leaveGroupRoom(String roomId) async {
       .delete()
       .eq('room_id', roomId)
       .eq('user_id', user.id);
+
+  MessageCacheService.removeGroup(roomId);
+  _roomProfileCaches.remove(roomId);
   invalidateMySubProfileCache(roomId);
 }
 

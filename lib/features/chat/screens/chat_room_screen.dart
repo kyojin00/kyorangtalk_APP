@@ -94,6 +94,11 @@ class _ChatRoomScreenState extends ConsumerState<ChatRoomScreen> {
   Timer? _draftSaveDebouncer;
   Timer? _markReadDebouncer;
 
+  // ⭐ NEW: 슬라이드 인 애니메이션 대상 메시지 ID
+  //   상대방이 보낸 새 메시지만 잠시 추가되어 부드럽게 슬라이드 인됨
+  //   자신 메시지는 옵티미스틱으로 이미 표시되니 애니메이션 불필요
+  final Set<String> _animatingMessageIds = {};
+
   bool get _isStatusLoaded =>
       _isBlocked != null &&
       _isBlockedByPartner != null &&
@@ -1227,6 +1232,27 @@ Future<void> _shareSchedule() async {
             }
           }
 
+          // ⭐ NEW: 상대방이 보낸 새 메시지에 슬라이드 인 효과
+          //   자신 메시지는 옵티미스틱으로 이미 표시되어 있어 제외
+          final newOtherMessages =
+              newMessages.where((m) => m.senderId != _myId).toList();
+          if (newOtherMessages.isNotEmpty) {
+            setState(() {
+              for (final m in newOtherMessages) {
+                _animatingMessageIds.add(m.id);
+              }
+            });
+            // 800ms 후 set에서 제거 (애니메이션은 ~280ms로 그 전에 완료됨)
+            Future.delayed(const Duration(milliseconds: 800), () {
+              if (!_disposed && mounted) {
+                setState(() {
+                  _animatingMessageIds
+                      .removeAll(newOtherMessages.map((m) => m.id));
+                });
+              }
+            });
+          }
+
           final sortedNew = [...newMessages]
             ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
           final latestNew = sortedNew.last;
@@ -1267,7 +1293,8 @@ Future<void> _shareSchedule() async {
 
             Expanded(
               child: msgsAsync.when(
-                loading: () => const MessageSkeleton(),
+                // ⭐ 카톡식: 로딩 스켈레톤 대신 빈 채팅창
+                loading: () => const SizedBox.expand(),
                 error: (e, _) => Center(
                   child: Text('오류: $e',
                       style: TextStyle(color: AppTheme.textSub)),
@@ -1409,13 +1436,30 @@ Future<void> _shareSchedule() async {
     );
   }
 
+  // ⭐ NEW: 빈 채팅창 ↔ 메시지 리스트를 AnimatedSwitcher로 부드럽게 전환
+  //   카톡처럼 첫 진입 시 비어있다가 메시지가 슬그머니 등장
   Widget _buildMessageList(List<MessageModel> messages) {
-    if (messages.isEmpty &&
+    final isEmpty = messages.isEmpty &&
         _failedMessages.isEmpty &&
-        _optimisticMessages.isEmpty) {
-      return EmptyChatState(partnerName: widget.room.partnerName);
-    }
+        _optimisticMessages.isEmpty;
 
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 350),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      child: isEmpty
+          ? KeyedSubtree(
+              key: const ValueKey('empty_state'),
+              child: EmptyChatState(partnerName: widget.room.partnerName),
+            )
+          : KeyedSubtree(
+              key: const ValueKey('message_list'),
+              child: _buildListView(messages),
+            ),
+    );
+  }
+
+  Widget _buildListView(List<MessageModel> messages) {
     final groups = _getGroupedMessages(messages);
 
     if (_searchMode && _searchQuery.isNotEmpty) {
@@ -1545,43 +1589,48 @@ Future<void> _shareSchedule() async {
                 .toLowerCase()
                 .contains(_searchQuery.toLowerCase());
 
+        final bubble = GestureDetector(
+          key: _getKeyFor(msg.id),
+          onLongPress: () => _handleMessageOptions(msg),
+          child: MessageBubble(
+            msg: msg,
+            roomId: widget.room.roomId,
+            isMe: isMe,
+            timeStr: _timeStr(msg.createdAt),
+            isHighlighted: isHighlighted,
+            searchQuery: _searchQuery,
+            partnerName: widget.room.partnerName,
+            partnerAvatar: widget.room.partnerAvatar,
+            onImageLoad: () {
+              if (_disposed) return;
+              if (_isNearBottom()) _jumpToBottom();
+            },
+            onImageTap: (url) {
+              final allUrls = msg.allImageUrls;
+              final initialIndex =
+                  allUrls.indexOf(url).clamp(0, allUrls.length - 1);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => MultiImageViewerScreen(
+                    imageUrls: allUrls.isEmpty ? [url] : allUrls,
+                    initialIndex: initialIndex < 0 ? 0 : initialIndex,
+                    senderName: isMe ? '나' : widget.room.partnerName,
+                    time: _timeStr(msg.createdAt),
+                  ),
+                ),
+              );
+            },
+            onAvatarTap: isMe ? null : _openPartnerProfile,
+          ),
+        );
+
+        // ⭐ NEW: 막 도착한 메시지에만 슬라이드 인 효과
+        final shouldAnimate = _animatingMessageIds.contains(msg.id);
+
         return RepaintBoundary(
           key: ValueKey('msg_${msg.id}'),
-          child: GestureDetector(
-            key: _getKeyFor(msg.id),
-            onLongPress: () => _handleMessageOptions(msg),
-            child: MessageBubble(
-              msg: msg,
-              roomId: widget.room.roomId,
-              isMe: isMe,
-              timeStr: _timeStr(msg.createdAt),
-              isHighlighted: isHighlighted,
-              searchQuery: _searchQuery,
-              partnerName: widget.room.partnerName,
-              partnerAvatar: widget.room.partnerAvatar,
-              onImageLoad: () {
-                if (_disposed) return;
-                if (_isNearBottom()) _jumpToBottom();
-              },
-              onImageTap: (url) {
-                final allUrls = msg.allImageUrls;
-                final initialIndex =
-                    allUrls.indexOf(url).clamp(0, allUrls.length - 1);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => MultiImageViewerScreen(
-                      imageUrls: allUrls.isEmpty ? [url] : allUrls,
-                      initialIndex: initialIndex < 0 ? 0 : initialIndex,
-                      senderName: isMe ? '나' : widget.room.partnerName,
-                      time: _timeStr(msg.createdAt),
-                    ),
-                  ),
-                );
-              },
-              onAvatarTap: isMe ? null : _openPartnerProfile,
-            ),
-          ),
+          child: shouldAnimate ? _SlideInWrapper(child: bubble) : bubble,
         );
       },
     );
@@ -1734,4 +1783,58 @@ class _ListItem {
 
   bool get isFailedMessage => failedMessage != null;
   bool get isOptimistic => optimistic != null;
+}
+
+// ═══════════════════════════════════════════════════
+// ⭐ NEW: 새 메시지 슬라이드 인 애니메이션 wrapper
+// 막 도착한 메시지가 살짝 아래에서 떠오르며 fade-in되는 효과
+// ═══════════════════════════════════════════════════
+class _SlideInWrapper extends StatefulWidget {
+  final Widget child;
+  const _SlideInWrapper({required this.child});
+
+  @override
+  State<_SlideInWrapper> createState() => _SlideInWrapperState();
+}
+
+class _SlideInWrapperState extends State<_SlideInWrapper>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<Offset> _offset;
+  late final Animation<double> _opacity;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    );
+    _offset = Tween<Offset>(
+      begin: const Offset(0, 0.15),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOutCubic,
+    ));
+    _opacity = Tween<double>(begin: 0, end: 1).animate(_controller);
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: SlideTransition(
+        position: _offset,
+        child: widget.child,
+      ),
+    );
+  }
 }

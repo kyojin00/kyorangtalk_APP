@@ -68,6 +68,9 @@ class _ReportDialogState extends ConsumerState<ReportDialog> {
   final _descController = TextEditingController();
   bool _submitting = false;
 
+  // ⭐ NEW: 차단 같이 처리 (기본 켜짐)
+  bool _alsoBlock = true;
+
   @override
   void dispose() {
     _descController.dispose();
@@ -83,15 +86,16 @@ class _ReportDialogState extends ConsumerState<ReportDialog> {
       final service = ref.read(reportServiceProvider);
 
       if (widget.type == ReportType.user) {
-        await service.reportUser(
+        await service.reportUserAndBlock(
           reportedUserId: widget.targetId,
           reason: _selectedReason!,
           description: _descController.text.trim().isEmpty
               ? null
               : _descController.text.trim(),
+          alsoBlock: _alsoBlock,
         );
       } else if (widget.type == ReportType.message) {
-        await service.reportMessage(
+        await service.reportMessageAndBlock(
           messageId: widget.targetId,
           senderId: widget.senderId!,
           roomId: widget.roomId!,
@@ -100,14 +104,18 @@ class _ReportDialogState extends ConsumerState<ReportDialog> {
           description: _descController.text.trim().isEmpty
               ? null
               : _descController.text.trim(),
+          alsoBlock: _alsoBlock,
         );
       }
 
       if (mounted) {
         Navigator.pop(context, true);
+        final msg = _alsoBlock
+            ? '신고 접수 + 차단 완료. 24시간 이내 검토됩니다'
+            : '신고가 접수되었어요. 빠르게 처리하겠습니다';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: const Text('신고가 접수되었어요. 빠르게 처리하겠습니다'),
+            content: Text(msg),
             behavior: SnackBarBehavior.floating,
             shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(10)),
@@ -138,7 +146,7 @@ class _ReportDialogState extends ConsumerState<ReportDialog> {
       child: ConstrainedBox(
         constraints: BoxConstraints(
           maxWidth: 400,
-          maxHeight: MediaQuery.of(context).size.height * 0.8,
+          maxHeight: MediaQuery.of(context).size.height * 0.85,
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -346,8 +354,7 @@ class _ReportDialogState extends ConsumerState<ReportDialog> {
                             fontSize: 13,
                           ),
                           border: InputBorder.none,
-                          contentPadding:
-                              const EdgeInsets.all(12),
+                          contentPadding: const EdgeInsets.all(12),
                           counterStyle: TextStyle(
                             color: AppTheme.textSub,
                             fontSize: 11,
@@ -357,6 +364,82 @@ class _ReportDialogState extends ConsumerState<ReportDialog> {
                     ),
 
                     const SizedBox(height: 16),
+
+                    // ⭐ NEW: 차단 체크박스
+                    InkWell(
+                      onTap: () =>
+                          setState(() => _alsoBlock = !_alsoBlock),
+                      borderRadius: BorderRadius.circular(10),
+                      child: Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: _alsoBlock
+                              ? const Color(0xFFEF4444).withOpacity(0.08)
+                              : AppTheme.bg,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: _alsoBlock
+                                ? const Color(0xFFEF4444).withOpacity(0.4)
+                                : AppTheme.border,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 20,
+                              height: 20,
+                              decoration: BoxDecoration(
+                                color: _alsoBlock
+                                    ? const Color(0xFFEF4444)
+                                    : Colors.transparent,
+                                borderRadius: BorderRadius.circular(5),
+                                border: Border.all(
+                                  color: _alsoBlock
+                                      ? const Color(0xFFEF4444)
+                                      : AppTheme.textMuted,
+                                  width: 1.5,
+                                ),
+                              ),
+                              child: _alsoBlock
+                                  ? const Icon(
+                                      Icons.check,
+                                      size: 14,
+                                      color: Colors.white,
+                                    )
+                                  : null,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    '이 사용자를 차단하기',
+                                    style: TextStyle(
+                                      color: AppTheme.textMain,
+                                      fontSize: 13.5,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    '메시지·통화·검색에서 자동 격리돼요',
+                                    style: TextStyle(
+                                      color: AppTheme.textSub,
+                                      fontSize: 11,
+                                      height: 1.4,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 12),
 
                     Container(
                       padding: const EdgeInsets.all(12),
@@ -421,10 +504,9 @@ class _ReportDialogState extends ConsumerState<ReportDialog> {
                   Expanded(
                     flex: 2,
                     child: ElevatedButton(
-                      onPressed:
-                          _selectedReason == null || _submitting
-                              ? null
-                              : _submit,
+                      onPressed: _selectedReason == null || _submitting
+                          ? null
+                          : _submit,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFFEF4444),
                         padding: const EdgeInsets.symmetric(
@@ -442,9 +524,9 @@ class _ReportDialogState extends ConsumerState<ReportDialog> {
                                 color: Colors.white,
                               ),
                             )
-                          : const Text(
-                              '신고하기',
-                              style: TextStyle(
+                          : Text(
+                              _alsoBlock ? '신고 + 차단' : '신고하기',
+                              style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 14,
                                 fontWeight: FontWeight.w800,

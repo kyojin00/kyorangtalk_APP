@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../shared/widgets/avatar_widget.dart';
-import '../../call/models/call_model.dart';
-import '../../call/widgets/call_button.dart';
+import '../../voice_room/screens/voice_room_screen.dart';
+import '../../voice_room/services/voice_room_service.dart';
 import '../models/group_room_model.dart';
 
 // ═══════════════════════════════════════════════════
-// 👥 GroupChatAppBar — 리디자인 + 실시간 인원수
+// 👥 GroupChatAppBar — 보이스 룸 빠른 진입 (최적화)
 // ═══════════════════════════════════════════════════
 
 AppBar buildGroupChatAppBar({
@@ -15,9 +15,8 @@ AppBar buildGroupChatAppBar({
   required bool isMuted,
   required VoidCallback onTitleTap,
   required VoidCallback onMenuTap,
-  int? memberCount, // ⭐ 실시간 인원수 (null이면 room.memberCount 사용)
+  int? memberCount,
 }) {
-  // ⭐ 실시간 카운트 우선
   final displayCount = memberCount ?? room.memberCount;
 
   return AppBar(
@@ -123,7 +122,6 @@ AppBar buildGroupChatAppBar({
                       ],
                     ),
                     const SizedBox(height: 2),
-                    // ⭐ 실시간 인원수 (애니메이션)
                     AnimatedSwitcher(
                       duration: const Duration(milliseconds: 300),
                       transitionBuilder: (child, anim) {
@@ -169,9 +167,9 @@ AppBar buildGroupChatAppBar({
       ),
     ),
     actions: [
-      CallButton(
-        roomType: CallRoomType.group,
-        sourceRoomId: room.id,
+      _VoiceRoomActionButton(
+        groupRoomId: room.id,
+        groupName: room.name,
       ),
       const SizedBox(width: 4),
       _CircleIconButton(
@@ -189,6 +187,75 @@ AppBar buildGroupChatAppBar({
       ),
     ),
   );
+}
+
+// ═══════════════════════════════════════════════════
+// 보이스 룸 버튼 - 즉시 화면 전환 (로딩 다이얼로그 제거)
+// ═══════════════════════════════════════════════════
+class _VoiceRoomActionButton extends StatelessWidget {
+  final String groupRoomId;
+  final String groupName;
+
+  const _VoiceRoomActionButton({
+    required this.groupRoomId,
+    required this.groupName,
+  });
+
+  /// ⭐ 최적화: 로딩 다이얼로그 없이 즉시 VoiceRoomScreen 으로 이동
+  /// 화면 진입과 동시에 백그라운드에서 룸 생성/입장 진행
+  void _startVoiceRoom(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => VoiceRoomScreen(
+          voiceRoomId: null, // ⭐ null = 새로 생성
+          groupRoomId: groupRoomId,
+          title: groupName,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 36,
+      height: 36,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            AppTheme.primary,
+            AppTheme.primary.withOpacity(0.85),
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.primary.withOpacity(0.3),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: ClipOval(
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () => _startVoiceRoom(context),
+            child: const Center(
+              child: Icon(
+                Icons.graphic_eq_rounded,
+                color: Colors.white,
+                size: 18,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _CircleIconButton extends StatelessWidget {

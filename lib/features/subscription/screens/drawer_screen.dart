@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -13,7 +15,7 @@ import 'subscription_screen.dart';
 // 위치: lib/features/subscription/screens/drawer_screen.dart
 //
 // 나간 채팅방 목록 표시.
-// 구독 안 한 상태면: 결제 유도
+// 구독 안 한 상태면: 목록 블러 + 결제 유도
 // 구독 한 상태면: 방 탭 → 옛 메시지 복원
 // ═══════════════════════════════════════════════
 
@@ -43,7 +45,8 @@ class DrawerScreen extends ConsumerWidget {
         ),
         actions: [
           IconButton(
-            icon: Icon(Icons.settings_outlined, color: AppTheme.textSub),
+            icon: Icon(Icons.settings_outlined,
+                color: AppTheme.textSub),
             onPressed: () {
               Navigator.push(
                 context,
@@ -66,7 +69,8 @@ class DrawerScreen extends ConsumerWidget {
         data: (hasSub) {
           return hiddenRoomsAsync.when(
             loading: () => const Center(
-              child: CircularProgressIndicator(color: AppTheme.primary),
+              child:
+                  CircularProgressIndicator(color: AppTheme.primary),
             ),
             error: (e, _) => Center(
               child: Text('오류: $e',
@@ -83,24 +87,48 @@ class DrawerScreen extends ConsumerWidget {
                   if (!hasSub)
                     _SubscribeBanner(roomCount: rooms.length)
                   else
-                    _ActiveBanner(roomCount: rooms.length, ref: ref),
+                    _ActiveBanner(
+                        roomCount: rooms.length, ref: ref),
 
-                  // 방 목록
+                  // 방 목록 (구독 안 했으면 블러)
                   Expanded(
-                    child: ListView.separated(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      itemCount: rooms.length,
-                      separatorBuilder: (_, __) => Divider(
-                          color: AppTheme.border, height: 1, indent: 80),
-                      itemBuilder: (_, i) {
-                        final room = rooms[i];
-                        return _HiddenRoomTile(
-                          room: room,
-                          hasSubscription: hasSub,
-                          onTap: () =>
-                              _handleTap(context, ref, room, hasSub),
-                        );
-                      },
+                    child: Stack(
+                      children: [
+                        // 리스트 본체
+                        ListView.separated(
+                          padding:
+                              const EdgeInsets.symmetric(vertical: 8),
+                          itemCount: rooms.length,
+                          // 구독 X 일 때 스크롤·탭 불가
+                          physics: hasSub
+                              ? const BouncingScrollPhysics()
+                              : const NeverScrollableScrollPhysics(),
+                          separatorBuilder: (_, __) => Divider(
+                              color: AppTheme.border,
+                              height: 1,
+                              indent: 80),
+                          itemBuilder: (_, i) {
+                            final room = rooms[i];
+                            return _HiddenRoomTile(
+                              room: room,
+                              hasSubscription: hasSub,
+                              onTap: hasSub
+                                  ? () => _handleTap(
+                                      context, ref, room, true)
+                                  : () => _goSubscribe(context, ref),
+                            );
+                          },
+                        ),
+
+                        // 구독 안 했으면 블러 + 결제 유도 오버레이
+                        if (!hasSub)
+                          Positioned.fill(
+                            child: _LockedOverlay(
+                              onSubscribe: () =>
+                                  _goSubscribe(context, ref),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
                 ],
@@ -112,6 +140,18 @@ class DrawerScreen extends ConsumerWidget {
     );
   }
 
+  void _goSubscribe(BuildContext context, WidgetRef ref) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const SubscriptionScreen(),
+      ),
+    ).then((_) {
+      ref.invalidate(hasActiveSubscriptionProvider);
+      ref.invalidate(subscriptionProvider);
+    });
+  }
+
   Future<void> _handleTap(
     BuildContext context,
     WidgetRef ref,
@@ -119,16 +159,7 @@ class DrawerScreen extends ConsumerWidget {
     bool hasSubscription,
   ) async {
     if (!hasSubscription) {
-      // 구독 화면으로 유도
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => const SubscriptionScreen(),
-        ),
-      ).then((_) {
-        ref.invalidate(hasActiveSubscriptionProvider);
-        ref.invalidate(subscriptionProvider);
-      });
+      _goSubscribe(context, ref);
       return;
     }
 
@@ -181,7 +212,8 @@ class DrawerScreen extends ConsumerWidget {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('${room.partnerName}님 옛 메시지를 복원했어요'),
+            content:
+                Text('${room.partnerName}님 옛 메시지를 복원했어요'),
             backgroundColor: AppTheme.primary,
             behavior: SnackBarBehavior.floating,
             shape: RoundedRectangleBorder(
@@ -196,6 +228,114 @@ class DrawerScreen extends ConsumerWidget {
         );
       }
     }
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 잠금 오버레이 (블러 + 결제 유도)
+// ═══════════════════════════════════════════════
+class _LockedOverlay extends StatelessWidget {
+  final VoidCallback onSubscribe;
+  const _LockedOverlay({required this.onSubscribe});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRect(
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+        child: Container(
+          color: AppTheme.bg.withOpacity(0.55),
+          alignment: Alignment.center,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [
+                        AppTheme.primary,
+                        AppTheme.primary.withOpacity(0.7),
+                      ],
+                    ),
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppTheme.primary.withOpacity(0.35),
+                        blurRadius: 20,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(
+                    Icons.lock_rounded,
+                    color: Colors.white,
+                    size: 32,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Text(
+                  '서랍이 잠겨있어요',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    color: AppTheme.textMain,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '구독하면 나간 채팅방의 옛 메시지를\n언제든지 다시 볼 수 있어요',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: AppTheme.textSub,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 22),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: onSubscribe,
+                    icon:
+                        const Icon(Icons.lock_open_rounded, size: 18),
+                    label: const Text(
+                      '서랍 열기',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primary,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(
+                          vertical: 14),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '7일 이내 미사용 시 100% 환불',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: AppTheme.textSub,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -234,7 +374,7 @@ class _EmptyState extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════
-// 구독 유도 배너
+// 구독 유도 배너 (블러는 아래 리스트에 적용되므로 배너는 그대로 보임)
 // ═══════════════════════════════════════════════
 class _SubscribeBanner extends StatelessWidget {
   final int roomCount;
@@ -305,8 +445,8 @@ class _SubscribeBanner extends StatelessWidget {
             ),
             child: const Text(
               '열기',
-              style:
-                  TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+              style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w700),
             ),
           ),
         ],
@@ -453,7 +593,8 @@ class _HiddenRoomTile extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        padding:
+            const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
         child: Row(
           children: [
             Stack(

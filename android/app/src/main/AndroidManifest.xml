@@ -110,8 +110,6 @@
             </intent-filter>
 
             <!-- ⭐⭐⭐ open.kyorang.com 통합 App Link -->
-            <!-- /join/CODE     → 채팅방 초대 -->
-            <!-- /verified      → 이메일 인증 완료 -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
@@ -121,9 +119,6 @@
                 <data android:pathPrefix="/verified"/>
             </intent-filter>
 
-            <!-- ⭐ Custom scheme fallback (인앱 브라우저 등 예외 케이스용) -->
-            <!-- kyorangtalk://join/CODE -->
-            <!-- kyorangtalk://verified -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
@@ -141,6 +136,13 @@
                 <action android:name="com.google.firebase.MESSAGING_EVENT"/>
             </intent-filter>
         </service>
+
+        <!-- ⭐ NEW: 보이스 룸 포그라운드 서비스 (flutter_foreground_task) -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="microphone"
+            android:stopWithTask="true"
+            android:exported="false" />
 
         <meta-data
             android:name="flutterEmbedding"

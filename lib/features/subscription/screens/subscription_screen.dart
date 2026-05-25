@@ -6,7 +6,9 @@ import '../../chat/services/revenuecat_service.dart';
 import '../services/subscription_service.dart';
 
 // ═══════════════════════════════════════════════
-// 💳 구독 화면 — RevenueCat 실제 결제
+// 💳 메시지 서랍 구독 화면 — RevenueCat 결제
+//
+// 위치: lib/features/subscription/screens/subscription_screen.dart
 // ═══════════════════════════════════════════════
 
 class SubscriptionScreen extends ConsumerStatefulWidget {
@@ -21,6 +23,7 @@ class _SubscriptionScreenState
     extends ConsumerState<SubscriptionScreen> {
   Package? _selectedPackage;
   bool _isPurchasing = false;
+  bool _autoSelected = false; // 최초 1회 자동 선택 가드
 
   @override
   Widget build(BuildContext context) {
@@ -67,10 +70,14 @@ class _SubscriptionScreenState
         data: (sub) {
           final isActive = sub?.isActive ?? false;
           return SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(
+              parent: BouncingScrollPhysics(),
+            ),
             padding: const EdgeInsets.all(20),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // ─── 헤더 일러스트 ─────────────────────
                 Container(
                   height: 180,
                   decoration: BoxDecoration(
@@ -85,7 +92,8 @@ class _SubscriptionScreenState
                     borderRadius: BorderRadius.circular(20),
                   ),
                   alignment: Alignment.center,
-                  child: const Text('🗄️', style: TextStyle(fontSize: 80)),
+                  child:
+                      const Text('🗄️', style: TextStyle(fontSize: 80)),
                 ),
 
                 const SizedBox(height: 28),
@@ -121,6 +129,7 @@ class _SubscriptionScreenState
 
                 const SizedBox(height: 24),
 
+                // ─── 결제 패키지 선택 ────────────────────
                 if (!isActive)
                   offeringAsync.when(
                     loading: () => const Padding(
@@ -138,11 +147,27 @@ class _SubscriptionScreenState
                       if (offering == null ||
                           offering.availablePackages.isEmpty) {
                         return _ErrorState(
-                          message: '결제 상품이 준비 중이에요\n잠시 후 다시 시도해주세요',
+                          message:
+                              '결제 상품이 준비 중이에요\n잠시 후 다시 시도해주세요',
                           onRetry: () =>
                               ref.invalidate(offeringProvider),
                         );
                       }
+
+                      // 최초 진입 시 연간(추천)을 기본 선택
+                      if (!_autoSelected && _selectedPackage == null) {
+                        _autoSelected = true;
+                        WidgetsBinding.instance
+                            .addPostFrameCallback((_) {
+                          if (mounted) {
+                            setState(() {
+                              _selectedPackage = offering.annual ??
+                                  offering.monthly;
+                            });
+                          }
+                        });
+                      }
+
                       return _PackagesSection(
                         offering: offering,
                         selected: _selectedPackage,
@@ -152,13 +177,25 @@ class _SubscriptionScreenState
                     },
                   ),
 
-                const SizedBox(height: 24),
+                const SizedBox(height: 18),
 
+                // ─── 신뢰 포인트 ─────────────────────────
+                if (!isActive) ...[
+                  _TrustPoint(text: '언제든지 해지 가능'),
+                  const SizedBox(height: 6),
+                  _TrustPoint(text: '7일 이내 미사용 시 100% 환불'),
+                  const SizedBox(height: 6),
+                  _TrustPoint(text: '자동 갱신 직후 48시간 이내 100% 환불'),
+                  const SizedBox(height: 24),
+                ],
+
+                // ─── 결제 / 관리 버튼 ────────────────────
                 if (isActive)
                   OutlinedButton(
                     onPressed: _showCancelInfo,
                     style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      padding:
+                          const EdgeInsets.symmetric(vertical: 16),
                       side: BorderSide(color: AppTheme.border),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14),
@@ -182,7 +219,8 @@ class _SubscriptionScreenState
                       backgroundColor: AppTheme.primary,
                       foregroundColor: Colors.white,
                       disabledBackgroundColor: AppTheme.border,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      padding:
+                          const EdgeInsets.symmetric(vertical: 16),
                       elevation: 0,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(14),
@@ -208,8 +246,14 @@ class _SubscriptionScreenState
                           ),
                   ),
 
+                const SizedBox(height: 28),
+
+                // ─── 자주 묻는 질문 ──────────────────────
+                _FaqSection(),
+
                 const SizedBox(height: 24),
 
+                // ─── 결제 안내 ─────────────────────────
                 Text(
                   '• 구독은 자동 갱신됩니다.\n'
                   '• 갱신 24시간 전까지 언제든지 취소할 수 있습니다.\n'
@@ -250,7 +294,8 @@ class _SubscriptionScreenState
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: const Text('🎉 서랍이 열렸어요! 즐거운 추억 여행을 시작해보세요'),
+              content:
+                  const Text('🎉 서랍이 열렸어요! 즐거운 추억 여행을 시작해보세요'),
               backgroundColor: AppTheme.primary,
               behavior: SnackBarBehavior.floating,
               shape: RoundedRectangleBorder(
@@ -259,14 +304,12 @@ class _SubscriptionScreenState
           );
         }
       } else if (result.isUserCancelled) {
-        // 사용자 취소
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('결제가 취소됐어요')),
           );
         }
       } else {
-        // 에러
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text(result.errorMessage ?? '결제 실패')),
@@ -339,7 +382,8 @@ class _SubscriptionScreenState
           '구독은 Google Play에서 직접 취소하실 수 있어요.\n\n'
           'Google Play 앱 → 메뉴 → 결제 및 정기결제\n'
           '→ 정기결제에서 메시지 서랍 선택 → 취소',
-          style: TextStyle(color: AppTheme.textSub, fontSize: 14, height: 1.6),
+          style: TextStyle(
+              color: AppTheme.textSub, fontSize: 14, height: 1.6),
         ),
         actions: [
           TextButton(
@@ -349,6 +393,32 @@ class _SubscriptionScreenState
           ),
         ],
       ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 신뢰 포인트 한 줄
+// ═══════════════════════════════════════════════
+class _TrustPoint extends StatelessWidget {
+  final String text;
+  const _TrustPoint({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(Icons.check_circle, color: AppTheme.primary, size: 14),
+        const SizedBox(width: 6),
+        Text(
+          text,
+          style: TextStyle(
+            color: AppTheme.textMain,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -574,37 +644,79 @@ class _PackagesSection extends StatelessWidget {
     required this.onSelect,
   });
 
+  /// 월간 대비 연간 할인율 (자동 계산)
+  int? _calcDiscount() {
+    final m = offering.monthly;
+    final a = offering.annual;
+    if (m == null || a == null) return null;
+    final monthlyTotal = m.storeProduct.price * 12;
+    if (monthlyTotal <= 0) return null;
+    final discount =
+        ((monthlyTotal - a.storeProduct.price) / monthlyTotal) * 100;
+    if (discount <= 0) return null;
+    return discount.round();
+  }
+
+  /// 연간 → 월 환산 가격 텍스트
+  String _annualMonthlyEquiv() {
+    final a = offering.annual;
+    if (a == null) return '';
+    final perMonth = (a.storeProduct.price / 12).round();
+    final fullStr = a.storeProduct.priceString;
+    final currencyMatch = RegExp(r'^[^\d]+').firstMatch(fullStr);
+    final currency = (currencyMatch?.group(0) ?? '').trim();
+    final formatted = perMonth.toString().replaceAllMapped(
+          RegExp(r'(\d)(?=(\d{3})+(?!\d))'),
+          (m) => '${m[1]},',
+        );
+    return '$currency$formatted';
+  }
+
   @override
   Widget build(BuildContext context) {
     final monthly = offering.monthly;
     final annual = offering.annual;
+    final discount = _calcDiscount();
+    final monthlyEquiv = _annualMonthlyEquiv();
 
-    return Row(
-      children: [
-        if (monthly != null)
-          Expanded(
-            child: _PackageCard(
-              package: monthly,
-              label: '월간',
-              subtitle: '월 단위 결제',
-              isSelected: selected?.identifier == monthly.identifier,
-              onTap: () => onSelect(monthly),
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (annual != null)
+            Expanded(
+              child: _PackageCard(
+                package: annual,
+                label: '연간',
+                subtitle: monthlyEquiv.isEmpty
+                    ? '연 1회 결제'
+                    : '월 $monthlyEquiv 꼴',
+                badge: discount != null && discount > 0
+                    ? '$discount% 절약'
+                    : '인기',
+                periodSuffix: '/ 년',
+                recommended: true,
+                isSelected:
+                    selected?.identifier == annual.identifier,
+                onTap: () => onSelect(annual),
+              ),
             ),
-          ),
-        if (monthly != null && annual != null)
-          const SizedBox(width: 12),
-        if (annual != null)
-          Expanded(
-            child: _PackageCard(
-              package: annual,
-              label: '연간',
-              subtitle: '2개월 무료',
-              recommended: true,
-              isSelected: selected?.identifier == annual.identifier,
-              onTap: () => onSelect(annual),
+          if (monthly != null && annual != null)
+            const SizedBox(width: 10),
+          if (monthly != null)
+            Expanded(
+              child: _PackageCard(
+                package: monthly,
+                label: '월간',
+                subtitle: '매월 자동 갱신',
+                periodSuffix: '/ 월',
+                isSelected:
+                    selected?.identifier == monthly.identifier,
+                onTap: () => onSelect(monthly),
+              ),
             ),
-          ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -613,6 +725,8 @@ class _PackageCard extends StatelessWidget {
   final Package package;
   final String label;
   final String subtitle;
+  final String? badge;
+  final String periodSuffix;
   final bool isSelected;
   final bool recommended;
   final VoidCallback onTap;
@@ -621,88 +735,278 @@ class _PackageCard extends StatelessWidget {
     required this.package,
     required this.label,
     required this.subtitle,
+    required this.periodSuffix,
     required this.isSelected,
     required this.onTap,
+    this.badge,
     this.recommended = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? AppTheme.primary.withOpacity(0.15)
-              : (recommended
-                  ? AppTheme.primary.withOpacity(0.05)
-                  : AppTheme.bgCard),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: isSelected
-                ? AppTheme.primary
-                : (recommended
-                    ? AppTheme.primary.withOpacity(0.5)
-                    : AppTheme.border),
-            width: isSelected ? 2 : (recommended ? 1.5 : 1),
-          ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: AppTheme.textSub,
-                  ),
-                ),
-                if (recommended) ...[
-                  const SizedBox(width: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 5, vertical: 1),
-                    decoration: BoxDecoration(
-                      color: AppTheme.primary,
-                      borderRadius: BorderRadius.circular(4),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            gradient: isSelected
+                ? LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      AppTheme.primary.withOpacity(0.18),
+                      AppTheme.primary.withOpacity(0.05),
+                    ],
+                  )
+                : null,
+            color: isSelected ? null : AppTheme.bgCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: isSelected
+                  ? AppTheme.primary
+                  : (recommended
+                      ? AppTheme.primary.withOpacity(0.4)
+                      : AppTheme.border),
+              width: isSelected ? 2 : (recommended ? 1.5 : 1),
+            ),
+            boxShadow: isSelected
+                ? [
+                    BoxShadow(
+                      color: AppTheme.primary.withOpacity(0.12),
+                      blurRadius: 14,
+                      offset: const Offset(0, 4),
                     ),
-                    child: const Text(
-                      '인기',
+                  ]
+                : null,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      label,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 8,
-                        fontWeight: FontWeight.w900,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: AppTheme.textMain,
                       ),
                     ),
                   ),
+                  if (badge != null) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: AppTheme.primary,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        badge!,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              package.storeProduct.priceString,
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.w800,
-                color: AppTheme.textMain,
               ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              subtitle,
-              style: TextStyle(
-                fontSize: 11,
-                color: AppTheme.textSub,
+              const SizedBox(height: 12),
+              Text(
+                package.storeProduct.priceString,
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+                style: TextStyle(
+                  fontSize: 19,
+                  fontWeight: FontWeight.w900,
+                  color: AppTheme.textMain,
+                  height: 1.1,
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: 2),
+              Text(
+                periodSuffix,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.textSub,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                subtitle,
+                overflow: TextOverflow.ellipsis,
+                maxLines: 1,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.textSub,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════
+// FAQ
+// ═══════════════════════════════════════════════
+class _FaqSection extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final faqs = [
+      (
+        '메시지 서랍이 뭐예요?',
+        '나간 채팅방의 메시지를 안전하게 보관해주는 기능이에요. '
+            '구독 중이면 언제든지 옛 대화를 다시 불러올 수 있어요.'
+      ),
+      (
+        '월간과 연간 중에 뭘 선택해야 하나요?',
+        '연간 결제는 1년치를 한 번에 결제하는 대신 월간 대비 더 저렴해요. '
+            '길게 쓰실 계획이라면 연간이, 우선 짧게 써보고 싶으시면 월간이 적합해요.'
+      ),
+      (
+        '언제든지 해지할 수 있나요?',
+        '네, Google Play의 정기 결제 메뉴에서 언제든지 해지할 수 있어요. '
+            '해지해도 결제한 기간 동안은 서랍을 계속 이용할 수 있어요.'
+      ),
+      (
+        '환불은 어떻게 받을 수 있나요?',
+        '결제 후 7일 이내 + 거의 사용하지 않으셨다면 100% 환불해드려요.\n\n'
+            '자동 갱신 직후 48시간 이내라면 실수 갱신 보호 차원에서 100% 환불해드려요.\n\n'
+            '장기 사용 후엔 사용 기간을 제외한 부분 환불이 가능할 수 있어요.\n\n'
+            '환불 신청은 Play 스토어 → 결제 및 정기 결제 → 예산 및 내역에서 직접 진행하시거나 '
+            '문의하기로 연락 주세요.'
+      ),
+      (
+        '실수로 자동 갱신됐어요',
+        '갱신 후 48시간 이내라면 100% 환불해드려요. '
+            '갱신 알림을 놓치셨거나 실수로 결제된 경우 안심하고 문의해 주세요.'
+      ),
+      (
+        '구독을 해지하면 서랍의 메시지는 어떻게 되나요?',
+        '구독이 만료되면 서랍이 잠겨서 옛 메시지에 접근할 수 없지만, '
+            '메시지는 안전하게 보관돼요. 다시 구독하시면 모두 그대로 볼 수 있어요.'
+      ),
+    ];
+
+    return Container(
+      decoration: BoxDecoration(
+        color: AppTheme.bgCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.border),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding:
+                const EdgeInsets.fromLTRB(16, 14, 16, 6),
+            child: Row(
+              children: [
+                Icon(Icons.help_outline,
+                    size: 16, color: AppTheme.textSub),
+                const SizedBox(width: 6),
+                Text(
+                  '자주 묻는 질문',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: AppTheme.textMain,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ...faqs.map((f) => _FaqItem(question: f.$1, answer: f.$2)),
+        ],
+      ),
+    );
+  }
+}
+
+class _FaqItem extends StatefulWidget {
+  final String question;
+  final String answer;
+  const _FaqItem({required this.question, required this.answer});
+
+  @override
+  State<_FaqItem> createState() => _FaqItemState();
+}
+
+class _FaqItemState extends State<_FaqItem> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          height: 0.5,
+          color: AppTheme.border,
+        ),
+        InkWell(
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: Padding(
+            padding:
+                const EdgeInsets.fromLTRB(16, 12, 14, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        widget.question,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          color: AppTheme.textMain,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    AnimatedRotation(
+                      turns: _expanded ? 0.5 : 0,
+                      duration:
+                          const Duration(milliseconds: 180),
+                      child: Icon(
+                        Icons.keyboard_arrow_down,
+                        color: AppTheme.textSub,
+                        size: 20,
+                      ),
+                    ),
+                  ],
+                ),
+                if (_expanded)
+                  Padding(
+                    padding:
+                        const EdgeInsets.only(top: 8, right: 24),
+                    child: Text(
+                      widget.answer,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppTheme.textSub,
+                        height: 1.6,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/friend_model.dart';
+import '../services/friend_cache_service.dart'; // ⭐ NEW
 
 // ═══════════════════════════════════════════════
 // 친구 관련 Provider 모음
@@ -8,23 +10,105 @@ import '../models/friend_model.dart';
 // 위치: lib/features/friends/providers/friends_provider.dart
 // ═══════════════════════════════════════════════
 
-// ── 내 프로필 ──
-final myProfileProvider =
-    FutureProvider<Map<String, dynamic>?>((ref) async {
+// ⭐ 변경: FutureProvider → StreamProvider
+//   카톡식: 캐시 즉시 emit → 백그라운드 fresh fetch → 머지
+final myProfileProvider = StreamProvider<Map<String, dynamic>?>((ref) {
   final supabase = Supabase.instance.client;
-  final myId = supabase.auth.currentUser!.id;
-  return await supabase
+  final myId = supabase.auth.currentUser?.id;
+
+  final controller = StreamController<Map<String, dynamic>?>();
+
+  if (myId == null) {
+    controller.add(null);
+    Future.microtask(() => controller.close());
+    return controller.stream;
+  }
+
+  // ⭐ ① 캐시 즉시 emit (있으면)
+  final cached = FriendCacheService.loadProfile(myId);
+  if (cached != null) {
+    controller.add(cached);
+  }
+
+  // ⭐ ② 백그라운드 fresh fetch + 캐시 갱신
+  supabase
       .from('kyorangtalk_profiles')
       .select('nickname, avatar_url, status_message')
       .eq('id', myId)
-      .maybeSingle();
+      .maybeSingle()
+      .then((data) async {
+    if (controller.isClosed) return;
+    controller.add(data);
+    if (data != null) {
+      await FriendCacheService.saveProfile(
+          myId, Map<String, dynamic>.from(data));
+    }
+  }).catchError((e) {
+    print('🔴 myProfile fetch 오류: $e');
+    if (!controller.isClosed && cached == null) {
+      controller.addError(e);
+    }
+  });
+
+  ref.onDispose(() {
+    if (!controller.isClosed) controller.close();
+  });
+
+  return controller.stream;
 });
 
-// ── 내 친구 목록 (즐겨찾기 포함, 즐겨찾기 우선 정렬) ──
-final friendsProvider = FutureProvider<List<FriendModel>>((ref) async {
+// ⭐ 변경: FutureProvider → StreamProvider
+//   카톡식: 캐시 즉시 emit → 백그라운드 fresh fetch → 머지
+final friendsProvider = StreamProvider<List<FriendModel>>((ref) {
   final supabase = Supabase.instance.client;
-  final myId = supabase.auth.currentUser!.id;
+  final myId = supabase.auth.currentUser?.id;
 
+  final controller = StreamController<List<FriendModel>>();
+
+  if (myId == null) {
+    controller.add([]);
+    Future.microtask(() => controller.close());
+    return controller.stream;
+  }
+
+  // ⭐ ① 캐시 즉시 emit
+  final cachedMaps = FriendCacheService.loadFriends(myId);
+  if (cachedMaps != null) {
+    try {
+      final cachedList = cachedMaps.map(_friendFromMap).toList();
+      controller.add(cachedList);
+    } catch (e) {
+      print('🔴 friends 캐시 파싱 오류: $e');
+    }
+  }
+
+  // ⭐ ② 백그라운드 fresh fetch + 캐시 갱신
+  _fetchFriends(supabase, myId).then((friends) async {
+    if (controller.isClosed) return;
+    controller.add(friends);
+    try {
+      final maps = friends.map(_friendToMap).toList();
+      await FriendCacheService.saveFriends(myId, maps);
+    } catch (e) {
+      print('🔴 friends 캐시 저장 오류: $e');
+    }
+  }).catchError((e) {
+    print('🔴 friends fetch 오류: $e');
+    if (!controller.isClosed && cachedMaps == null) {
+      controller.addError(e);
+    }
+  });
+
+  ref.onDispose(() {
+    if (!controller.isClosed) controller.close();
+  });
+
+  return controller.stream;
+});
+
+// 친구 목록 fetch (병렬화로 더 빠르게)
+Future<List<FriendModel>> _fetchFriends(
+    SupabaseClient supabase, String myId) async {
   final data = await supabase
       .from('kyorangtalk_friends')
       .select('*')
@@ -40,32 +124,38 @@ final friendsProvider = FutureProvider<List<FriendModel>>((ref) async {
         : f['requester_id'] as String;
   }).toList();
 
-  final profiles = await supabase
-      .from('kyorangtalk_profiles')
-      .select('id, nickname, avatar_url, status_message')
-      .inFilter('id', friendIds);
+  // ⭐ 병렬 fetch (직렬 → 병렬: ~3 round-trips → 1 round-trip)
+  final results = await Future.wait<dynamic>([
+    supabase
+        .from('kyorangtalk_profiles')
+        .select('id, nickname, avatar_url, status_message')
+        .inFilter('id', friendIds),
+    supabase
+        .from('kyorangtalk_sub_profiles')
+        .select('''
+          user_id, nickname, avatar_url, status_message,
+          kyorangtalk_sub_profile_viewers!inner(viewer_id)
+        ''')
+        .inFilter('user_id', friendIds)
+        .eq('kyorangtalk_sub_profile_viewers.viewer_id', myId),
+    supabase
+        .from('kyorangtalk_friend_favorites')
+        .select('friend_id')
+        .eq('user_id', myId),
+  ]);
+
+  final profiles = results[0] as List;
+  final subProfiles = results[1] as List;
+  final favs = results[2] as List;
 
   final profileMap = {for (final p in profiles) p['id'] as String: p};
 
-  final subProfiles = await supabase
-      .from('kyorangtalk_sub_profiles')
-      .select('''
-        user_id, nickname, avatar_url, status_message,
-        kyorangtalk_sub_profile_viewers!inner(viewer_id)
-      ''')
-      .inFilter('user_id', friendIds)
-      .eq('kyorangtalk_sub_profile_viewers.viewer_id', myId);
-
   final subProfileMap = <String, Map<String, dynamic>>{};
   for (final sp in subProfiles) {
-    subProfileMap[sp['user_id'] as String] = sp;
+    subProfileMap[sp['user_id'] as String] =
+        sp as Map<String, dynamic>;
   }
 
-  // ⭐ 즐겨찾기 ID Set 조회
-  final favs = await supabase
-      .from('kyorangtalk_friend_favorites')
-      .select('friend_id')
-      .eq('user_id', myId);
   final favoriteIds = <String>{
     for (final f in favs) f['friend_id'] as String,
   };
@@ -111,9 +201,38 @@ final friendsProvider = FutureProvider<List<FriendModel>>((ref) async {
   });
 
   return result;
-});
+}
 
-// ── 알 수도 있는 친구 (RPC) ──
+// ⭐ FriendModel ↔ Map 변환 (캐시 직렬화용)
+Map<String, dynamic> _friendToMap(FriendModel f) {
+  return {
+    'id':            f.id,
+    'requesterId':   f.requesterId,
+    'receiverId':    f.receiverId,
+    'status':        f.status,
+    'friendId':      f.friendId,
+    'nickname':      f.nickname,
+    'avatarUrl':     f.avatarUrl,
+    'statusMessage': f.statusMessage,
+    'isFavorite':    f.isFavorite,
+  };
+}
+
+FriendModel _friendFromMap(Map<String, dynamic> m) {
+  return FriendModel(
+    id:            m['id'] as String,
+    requesterId:   m['requesterId'] as String,
+    receiverId:    m['receiverId'] as String,
+    status:        m['status'] as String,
+    friendId:      m['friendId'] as String,
+    nickname:      m['nickname'] as String,
+    avatarUrl:     m['avatarUrl'] as String?,
+    statusMessage: m['statusMessage'] as String?,
+    isFavorite:    (m['isFavorite'] as bool?) ?? false,
+  );
+}
+
+// ── 알 수도 있는 친구 (RPC) — 캐싱 안 함 (작은 영역) ──
 final friendSuggestionsProvider =
     FutureProvider<List<SuggestedFriend>>((ref) async {
   final supabase = Supabase.instance.client;
@@ -150,7 +269,7 @@ final friendSuggestionsProvider =
   }
 });
 
-// ⭐ 즐겨찾기 토글
+// 즐겨찾기 토글
 Future<bool> toggleFriendFavorite(String friendId) async {
   try {
     final result = await Supabase.instance.client.rpc(
@@ -164,10 +283,10 @@ Future<bool> toggleFriendFavorite(String friendId) async {
   }
 }
 
-// ⭐ 신고 (기존 kyorangtalk_reports 테이블 활용)
+// 신고
 Future<void> reportFriend({
   required String reportedUserId,
-  required String reason,        // 'spam', 'harassment', 'inappropriate', 'fake', 'other'
+  required String reason,
   String? description,
 }) async {
   final supabase = Supabase.instance.client;
@@ -184,7 +303,7 @@ Future<void> reportFriend({
   });
 }
 
-// "관심 없음" — 추천 거부
+// 추천 거부
 Future<void> dismissFriendSuggestion(String userId) async {
   try {
     await Supabase.instance.client.rpc(
@@ -196,7 +315,7 @@ Future<void> dismissFriendSuggestion(String userId) async {
   }
 }
 
-// ── 받은 친구 요청 ──
+// ── 받은 친구 요청 — 캐싱 안 함 (작은 영역, 배지만 표시) ──
 final pendingRequestsProvider =
     FutureProvider<List<Map<String, dynamic>>>((ref) async {
   final supabase = Supabase.instance.client;

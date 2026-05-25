@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -114,6 +115,80 @@ class ReportService {
     });
   }
 
+  /// ⭐ NEW: 사용자 차단 + 친구 관계 삭제
+  Future<void> blockUser(String userId) async {
+    final myId = _supabase.auth.currentUser!.id;
+    if (userId == myId) return;
+
+    final existing = await _supabase
+        .from('kyorangtalk_blocks')
+        .select('id')
+        .eq('blocker_id', myId)
+        .eq('blocked_id', userId)
+        .maybeSingle();
+
+    if (existing != null) return;
+
+    await _supabase.from('kyorangtalk_blocks').insert({
+      'blocker_id': myId,
+      'blocked_id': userId,
+    });
+
+    try {
+      await _supabase.from('kyorangtalk_friends').delete().or(
+          'and(requester_id.eq.$myId,receiver_id.eq.$userId),'
+          'and(requester_id.eq.$userId,receiver_id.eq.$myId)');
+    } catch (_) {}
+  }
+
+  /// ⭐ NEW: 신고 + 자동 차단 (사용자)
+  Future<void> reportUserAndBlock({
+    required String reportedUserId,
+    required ReportReason reason,
+    String? description,
+    String? contentSnapshot,
+    bool alsoBlock = true,
+  }) async {
+    await reportUser(
+      reportedUserId: reportedUserId,
+      reason: reason,
+      description: description,
+      contentSnapshot: contentSnapshot,
+    );
+
+    if (alsoBlock) {
+      try {
+        await blockUser(reportedUserId);
+      } catch (_) {}
+    }
+  }
+
+  /// ⭐ NEW: 신고 + 자동 차단 (메시지)
+  Future<void> reportMessageAndBlock({
+    required String messageId,
+    required String senderId,
+    required String roomId,
+    required String messageContent,
+    required ReportReason reason,
+    String? description,
+    bool alsoBlock = true,
+  }) async {
+    await reportMessage(
+      messageId: messageId,
+      senderId: senderId,
+      roomId: roomId,
+      messageContent: messageContent,
+      reason: reason,
+      description: description,
+    );
+
+    if (alsoBlock) {
+      try {
+        await blockUser(senderId);
+      } catch (_) {}
+    }
+  }
+
   /// 내 신고 내역 조회
   Future<List<Map<String, dynamic>>> getMyReports() async {
     final myId = _supabase.auth.currentUser!.id;
@@ -125,6 +200,21 @@ class ReportService {
         .order('created_at', ascending: false);
 
     return List<Map<String, dynamic>>.from(data);
+  }
+
+  /// ⭐ NEW: 내가 차단한 사용자 ID 목록 조회
+  Future<Set<String>> getBlockedUserIds() async {
+    final myId = _supabase.auth.currentUser?.id;
+    if (myId == null) return <String>{};
+
+    final data = await _supabase
+        .from('kyorangtalk_blocks')
+        .select('blocked_id')
+        .eq('blocker_id', myId);
+
+    return (data as List)
+        .map((row) => row['blocked_id'] as String)
+        .toSet();
   }
 }
 
@@ -139,4 +229,50 @@ final myReportsProvider =
     FutureProvider<List<Map<String, dynamic>>>((ref) async {
   final service = ref.watch(reportServiceProvider);
   return service.getMyReports();
+});
+
+/// ⭐ NEW: 내가 차단한 사용자 ID 목록 (그룹 채팅 + 보이스 룸 필터링용)
+///
+/// 실시간으로 차단 변경을 감지해서 자동 업데이트.
+final blockedUserIdsProvider = StreamProvider<Set<String>>((ref) {
+  final supabase = Supabase.instance.client;
+  final myId = supabase.auth.currentUser?.id;
+  if (myId == null) {
+    return Stream.value(<String>{});
+  }
+
+  final service = ref.read(reportServiceProvider);
+  final controller = StreamController<Set<String>>();
+
+  // 초기 로드
+  service.getBlockedUserIds().then((ids) {
+    if (!controller.isClosed) controller.add(ids);
+  });
+
+  // Realtime 구독
+  final channel = supabase
+      .channel('blocked_users:$myId')
+      .onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: 'kyorangtalk_blocks',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'blocker_id',
+          value: myId,
+        ),
+        callback: (_) async {
+          if (controller.isClosed) return;
+          final ids = await service.getBlockedUserIds();
+          if (!controller.isClosed) controller.add(ids);
+        },
+      )
+      .subscribe();
+
+  ref.onDispose(() {
+    controller.close();
+    supabase.removeChannel(channel);
+  });
+
+  return controller.stream;
 });

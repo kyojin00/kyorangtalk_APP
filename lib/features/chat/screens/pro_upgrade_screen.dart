@@ -6,7 +6,9 @@ import '../services/revenuecat_service.dart';
 import '../services/subscription_service.dart';
 
 /// ═══════════════════════════════════════════════════
-/// Pro 업그레이드 페이지 (RC 결제 통합)
+/// Pro 업그레이드 페이지 (RC 결제 통합 — 월간/연간)
+///
+/// 위치: lib/features/chat/screens/pro_upgrade_screen.dart
 /// ═══════════════════════════════════════════════════
 class ProUpgradeScreen extends ConsumerStatefulWidget {
   const ProUpgradeScreen({super.key});
@@ -17,30 +19,58 @@ class ProUpgradeScreen extends ConsumerStatefulWidget {
 
 class _ProUpgradeScreenState extends ConsumerState<ProUpgradeScreen> {
   Package? _monthlyPackage;
+  Package? _annualPackage;
+  Package? _selectedPackage;
   bool _loadingPackage = true;
   bool _purchasing = false;
 
   @override
   void initState() {
     super.initState();
-    _loadPackage();
+    _loadPackages();
   }
 
-  Future<void> _loadPackage() async {
-    final pkg = await RevenueCatService.fetchMonthlyPackage();
+  Future<void> _loadPackages() async {
+    final pkgs = await RevenueCatService.fetchAllPackages();
     if (mounted) {
       setState(() {
-        _monthlyPackage = pkg;
+        _monthlyPackage = pkgs.monthly;
+        _annualPackage = pkgs.annual;
+        _selectedPackage = pkgs.annual ?? pkgs.monthly;
         _loadingPackage = false;
       });
     }
   }
 
-  String get _priceText {
-    if (_monthlyPackage != null) {
-      return _monthlyPackage!.storeProduct.priceString;
-    }
-    return '₩6,500';
+  bool get _isAnnualSelected =>
+      _selectedPackage != null &&
+      _annualPackage != null &&
+      _selectedPackage!.identifier == _annualPackage!.identifier;
+
+  int? get _discountPercent {
+    if (_monthlyPackage == null || _annualPackage == null) return null;
+    final monthlyTotal = _monthlyPackage!.storeProduct.price * 12;
+    final annualPrice = _annualPackage!.storeProduct.price;
+    if (monthlyTotal <= 0) return null;
+    final discount = ((monthlyTotal - annualPrice) / monthlyTotal) * 100;
+    if (discount <= 0) return null;
+    return discount.round();
+  }
+
+  String get _annualMonthlyEquivText {
+    if (_annualPackage == null) return '';
+    final perMonth = (_annualPackage!.storeProduct.price / 12).round();
+    final fullStr = _annualPackage!.storeProduct.priceString;
+    final currencyMatch = RegExp(r'^[^\d]+').firstMatch(fullStr);
+    final currency = (currencyMatch?.group(0) ?? '').trim();
+    return '$currency${_formatNumber(perMonth)}';
+  }
+
+  String _formatNumber(int n) {
+    return n.toString().replaceAllMapped(
+          RegExp(r'(\d)(?=(\d{3})+(?!\d))'),
+          (m) => '${m[1]},',
+        );
   }
 
   @override
@@ -57,17 +87,17 @@ class _ProUpgradeScreenState extends ConsumerState<ProUpgradeScreen> {
                 SliverToBoxAdapter(child: _buildHero(context)),
                 SliverToBoxAdapter(
                   child: statusAsync.when(
-                    data: (status) =>
-                        _buildStatusCard(context, status),
+                    data: (status) => _buildStatusCard(context, status),
                     loading: () => const SizedBox(height: 8),
                     error: (_, __) => const SizedBox(height: 8),
                   ),
                 ),
-                SliverToBoxAdapter(child: _buildPriceCard(context)),
+                SliverToBoxAdapter(child: _buildPlanCards(context)),
                 SliverToBoxAdapter(child: _buildBenefits(context)),
                 SliverToBoxAdapter(child: _buildComparison(context)),
                 SliverToBoxAdapter(child: _buildRestoreButton(context)),
                 SliverToBoxAdapter(child: _buildFaq(context)),
+                SliverToBoxAdapter(child: _buildPolicyLinks(context)),
                 const SliverToBoxAdapter(child: SizedBox(height: 100)),
               ],
             ),
@@ -296,132 +326,249 @@ class _ProUpgradeScreenState extends ConsumerState<ProUpgradeScreen> {
     return '${dt.year}.${dt.month.toString().padLeft(2, '0')}.${dt.day.toString().padLeft(2, '0')}';
   }
 
-  Widget _buildPriceCard(BuildContext context) {
+  Widget _buildPlanCards(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-      child: Container(
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              AppTheme.primary.withOpacity(0.12),
-              AppTheme.primary.withOpacity(0.04),
+      child: Column(
+        children: [
+          if (_loadingPackage)
+            Container(
+              height: 140,
+              decoration: BoxDecoration(
+                color: AppTheme.bgCard,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: AppTheme.border),
+              ),
+              child: Center(
+                child: SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppTheme.primary,
+                  ),
+                ),
+              ),
+            )
+          else if (_monthlyPackage == null && _annualPackage == null)
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: AppTheme.bgCard,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: AppTheme.border),
+              ),
+              child: Text(
+                '상품 정보를 불러올 수 없어요.\n잠시 후 다시 시도해주세요.',
+                style: TextStyle(color: AppTheme.textSub, fontSize: 13),
+              ),
+            )
+          else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_annualPackage != null)
+                  Expanded(
+                    child: _buildPlanCard(
+                      package: _annualPackage!,
+                      label: '연간',
+                      isAnnual: true,
+                      isSelected: _isAnnualSelected,
+                      onTap: () => setState(
+                          () => _selectedPackage = _annualPackage),
+                    ),
+                  ),
+                if (_monthlyPackage != null && _annualPackage != null)
+                  const SizedBox(width: 10),
+                if (_monthlyPackage != null)
+                  Expanded(
+                    child: _buildPlanCard(
+                      package: _monthlyPackage!,
+                      label: '월간',
+                      isAnnual: false,
+                      isSelected: !_isAnnualSelected,
+                      onTap: () => setState(
+                          () => _selectedPackage = _monthlyPackage),
+                    ),
+                  ),
+              ],
+            ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Icon(Icons.check_circle,
+                  color: AppTheme.primary, size: 14),
+              const SizedBox(width: 6),
+              Text(
+                '신규 가입 시 7일 무료 체험',
+                style: TextStyle(
+                  color: AppTheme.textMain,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ],
           ),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: AppTheme.primary.withOpacity(0.4),
-            width: 1.5,
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Icon(Icons.check_circle,
+                  color: AppTheme.primary, size: 14),
+              const SizedBox(width: 6),
+              Text(
+                '언제든지 해지 가능',
+                style: TextStyle(
+                  color: AppTheme.textMain,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
           ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Icon(Icons.check_circle,
+                  color: AppTheme.primary, size: 14),
+              const SizedBox(width: 6),
+              Text(
+                '7일 이내 미사용 시 100% 환불',
+                style: TextStyle(
+                  color: AppTheme.textMain,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlanCard({
+    required Package package,
+    required String label,
+    required bool isAnnual,
+    required bool isSelected,
+    required VoidCallback onTap,
+  }) {
+    final discount = isAnnual ? _discountPercent : null;
+    final showBadge = isAnnual;
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(18),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+        decoration: BoxDecoration(
+          gradient: isSelected
+              ? LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    AppTheme.primary.withOpacity(0.18),
+                    AppTheme.primary.withOpacity(0.06),
+                  ],
+                )
+              : null,
+          color: isSelected ? null : AppTheme.bgCard,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(
+            color: isSelected ? AppTheme.primary : AppTheme.border,
+            width: isSelected ? 2 : 1,
+          ),
+          boxShadow: isSelected
+              ? [
+                  BoxShadow(
+                    color: AppTheme.primary.withOpacity(0.15),
+                    blurRadius: 16,
+                    offset: const Offset(0, 4),
+                  ),
+                ]
+              : null,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Row(
               children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppTheme.primary,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Text(
-                    '추천',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
                 Text(
-                  'Pro 월간',
+                  label,
                   style: TextStyle(
                     color: AppTheme.textMain,
-                    fontSize: 16,
+                    fontSize: 14,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                if (_loadingPackage)
-                  SizedBox(
-                    height: 32,
-                    width: 100,
-                    child: Center(
-                      child: SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: AppTheme.primary,
-                        ),
+                const Spacer(),
+                if (showBadge)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: AppTheme.primary,
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                    child: Text(
+                      discount != null && discount > 0
+                          ? '$discount% 절약'
+                          : 'BEST',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
                       ),
                     ),
-                  )
-                else
+                  ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
                   Text(
-                    _priceText,
+                    package.storeProduct.priceString,
                     style: TextStyle(
                       color: AppTheme.textMain,
-                      fontSize: 32,
+                      fontSize: 22,
                       fontWeight: FontWeight.w900,
                       height: 1,
                     ),
                   ),
-                const SizedBox(width: 6),
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Text(
-                    '/ 월',
-                    style: TextStyle(
-                      color: AppTheme.textSub,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
+                  const SizedBox(width: 3),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 2),
+                    child: Text(
+                      isAnnual ? '/ 년' : '/ 월',
+                      style: TextStyle(
+                        color: AppTheme.textSub,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Icon(Icons.check_circle,
-                    color: AppTheme.primary, size: 14),
-                const SizedBox(width: 6),
-                Text(
-                  '신규 가입 시 7일 무료 체험',
-                  style: TextStyle(
-                    color: AppTheme.textMain,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Row(
-              children: [
-                Icon(Icons.check_circle,
-                    color: AppTheme.primary, size: 14),
-                const SizedBox(width: 6),
-                Text(
-                  '언제든지 해지 가능',
-                  style: TextStyle(
-                    color: AppTheme.textMain,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
+            const SizedBox(height: 6),
+            Text(
+              isAnnual
+                  ? (_annualMonthlyEquivText.isEmpty
+                      ? '연 1회 결제'
+                      : '월 $_annualMonthlyEquivText 꼴')
+                  : '매월 자동 갱신',
+              style: TextStyle(
+                color: AppTheme.textSub,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ],
         ),
@@ -710,9 +857,29 @@ class _ProUpgradeScreenState extends ConsumerState<ProUpgradeScreen> {
             '7일이 지나면 자동으로 Free로 전환돼요. AI 기능은 하루 5회씩 사용 가능하고, 일반 채팅은 그대로 무제한이에요.',
       ),
       _Faq(
+        question: '월간과 연간 중에 뭘 선택해야 하나요?',
+        answer:
+            '연간 결제는 1년치를 한 번에 결제하는 대신 월간 대비 더 저렴해요. 길게 쓰실 계획이라면 연간이, 우선 짧게 써보고 싶으시면 월간이 적합해요.',
+      ),
+      _Faq(
         question: '언제든지 해지할 수 있나요?',
         answer:
             '네, Google Play의 구독 관리 메뉴에서 언제든지 해지할 수 있어요. 해지해도 결제한 기간 동안은 Pro 기능을 계속 사용할 수 있어요.',
+      ),
+      _Faq(
+        question: '환불은 어떻게 받을 수 있나요?',
+        answer:
+            '교랑톡은 다음 기준으로 환불을 제공해요.\n\n'
+            '• 결제 후 7일 이내 + AI 기능 사용량이 적을 때 → 100% 환불\n'
+            '• 자동 갱신 직후 48시간 이내 → 100% 환불 (실수 갱신 보호)\n'
+            '• 장기 사용 후 환불 요청 → 사용 기간을 제외한 부분 환불 가능 또는 거부\n\n'
+            '환불 신청은 Play 스토어 → 결제 및 정기 결제 → 예산 및 내역에서 직접 진행하시거나, '
+            '교랑톡 고객센터로 문의해 주세요. 영업일 기준 1~3일 내 처리됩니다.',
+      ),
+      _Faq(
+        question: '실수로 자동 갱신됐어요. 환불 가능한가요?',
+        answer:
+            '갱신 후 48시간 이내라면 100% 환불해드려요. 갱신 알림을 놓치셨거나 실수로 결제된 경우 안심하고 문의해 주세요.',
       ),
       _Faq(
         question: '일일 사용량은 언제 리셋되나요?',
@@ -741,15 +908,68 @@ class _ProUpgradeScreenState extends ConsumerState<ProUpgradeScreen> {
     );
   }
 
-  // ⭐ 결제 버튼
+  Widget _buildPolicyLinks(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: AppTheme.bgCard.withOpacity(0.5),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppTheme.border.withOpacity(0.5)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '결제 및 환불 안내',
+              style: TextStyle(
+                color: AppTheme.textMain,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '• 구독은 결제 직후부터 활성화되며, 매월(또는 매년) 자동 갱신됩니다.\n'
+              '• 갱신 24시간 전까지 해지하지 않으면 같은 금액이 자동 청구됩니다.\n'
+              '• 해지는 Play 스토어 → 정기 결제에서 직접 진행하실 수 있어요.\n'
+              '• 환불 정책은 위 FAQ를 참고하세요.\n'
+              '• 다른 기기에서도 같은 Google 계정으로 이용 가능합니다.',
+              style: TextStyle(
+                color: AppTheme.textSub,
+                fontSize: 11,
+                height: 1.7,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildBottomBar(
       BuildContext context, SubscriptionStatus? status) {
     final isAlreadyPro =
         status?.isPro == true && status?.isInTrial == false;
     final canPurchase = !isAlreadyPro &&
         !_loadingPackage &&
-        _monthlyPackage != null &&
+        _selectedPackage != null &&
         !_purchasing;
+
+    String buttonText;
+    if (isAlreadyPro) {
+      buttonText = '이미 Pro 사용 중';
+    } else if (_loadingPackage) {
+      buttonText = '상품 정보 불러오는 중...';
+    } else if (_selectedPackage == null) {
+      buttonText = '결제 준비 중';
+    } else {
+      final pkg = _selectedPackage!;
+      final periodText = _isAnnualSelected ? '/ 년' : '/ 월';
+      buttonText =
+          '${pkg.storeProduct.priceString} $periodText — Pro 시작하기';
+    }
 
     return Container(
       decoration: BoxDecoration(
@@ -794,17 +1014,14 @@ class _ProUpgradeScreenState extends ConsumerState<ProUpgradeScreen> {
                     size: 20,
                   ),
                   const SizedBox(width: 8),
-                  Text(
-                    isAlreadyPro
-                        ? '이미 Pro 사용 중'
-                        : (_loadingPackage
-                            ? '상품 정보 불러오는 중...'
-                            : (_monthlyPackage == null
-                                ? '결제 준비 중'
-                                : '$_priceText / 월 — Pro 시작하기')),
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w800,
+                  Flexible(
+                    child: Text(
+                      buttonText,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
                 ],
@@ -813,15 +1030,13 @@ class _ProUpgradeScreenState extends ConsumerState<ProUpgradeScreen> {
     );
   }
 
-  // ═══════════════════════════════════════════════════
-  // ⭐ 결제 핸들러
-  // ═══════════════════════════════════════════════════
   Future<void> _handlePurchase() async {
-    if (_monthlyPackage == null || _purchasing) return;
+    final selected = _selectedPackage;
+    if (selected == null || _purchasing) return;
 
     setState(() => _purchasing = true);
 
-    final result = await RevenueCatService.purchase(_monthlyPackage!);
+    final result = await RevenueCatService.purchase(selected);
 
     if (!mounted) return;
     setState(() => _purchasing = false);

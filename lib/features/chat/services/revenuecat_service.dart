@@ -7,7 +7,6 @@ import 'package:purchases_flutter/purchases_flutter.dart';
 /// ═══════════════════════════════════════════════════
 class RevenueCatService {
   // ⭐ RC Dashboard → Project Settings → API Keys → Android의 'goog_...' 키
-  // TODO: 실제 키로 교체
   static const String _googleApiKey = 'goog_CNBOGcKPfZLIBevDLzJezLcsMvD';
 
   // iOS (나중에 Apple Developer 가입 후 추가)
@@ -117,43 +116,107 @@ class RevenueCatService {
     }
   }
 
+  /// ⭐ 연간 패키지
+  static Future<Package?> fetchAnnualPackage() async {
+    if (!_initialized) return null;
+
+    try {
+      final offerings = await Purchases.getOfferings();
+      final current = offerings.current;
+      if (current == null) return null;
+      return current.annual;
+    } catch (e) {
+      debugPrint('🔴 [RC] 연간 패키지 조회 실패: $e');
+      return null;
+    }
+  }
+
+  /// ⭐ 월간/연간 한 번에 로드 (병렬 X — getOfferings 1회 호출로 둘 다 추출)
+  static Future<({Package? monthly, Package? annual})>
+      fetchAllPackages() async {
+    if (!_initialized) return (monthly: null, annual: null);
+
+    try {
+      final offerings = await Purchases.getOfferings();
+      final current = offerings.current;
+      if (current == null) {
+        debugPrint('⚠️ [RC] Current offering 없음');
+        return (monthly: null, annual: null);
+      }
+      return (monthly: current.monthly, annual: current.annual);
+    } catch (e) {
+      debugPrint('🔴 [RC] fetchAllPackages 실패: $e');
+      return (monthly: null, annual: null);
+    }
+  }
+
   /// ═══════════════════════════════════════════════════
   /// ⭐ 결제 (purchases_flutter 8.x API)
   ///
   /// 8.x에서는 purchasePackage()가 CustomerInfo를 직접 반환
-  /// (이전 버전의 PurchaseResult.customerInfo 아님)
   /// ═══════════════════════════════════════════════════
-  static Future<PurchaseResult> purchase(Package package) async {
-    if (!_initialized) {
-      return PurchaseResult.error('RC가 초기화되지 않았습니다');
-    }
-
-    try {
-      // ⭐ 8.x: CustomerInfo 직접 반환
-      final customerInfo = await Purchases.purchasePackage(package);
-      final entitlement = customerInfo.entitlements.active[entitlementId];
-
-      if (entitlement != null) {
-        debugPrint('✅ [RC] 결제 완료, Pro 활성화: $entitlementId');
-        return PurchaseResult.success();
-      } else {
-        debugPrint('⚠️ [RC] 결제는 됐는데 entitlement 활성화 안 됨');
-        return PurchaseResult.error('결제는 처리됐지만 권한이 활성화되지 않았어요');
-      }
-    } on PlatformException catch (e) {
-      // ⭐ flutter/services.dart에서 import
-      final errorCode = PurchasesErrorHelper.getErrorCode(e);
-      if (errorCode == PurchasesErrorCode.purchaseCancelledError) {
-        debugPrint('⏸️ [RC] 사용자가 결제 취소');
-        return PurchaseResult.userCancelled();
-      }
-      debugPrint('🔴 [RC] 결제 실패: $errorCode / ${e.message}');
-      return PurchaseResult.error(_errorMessageKr(errorCode, e.message));
-    } catch (e) {
-      debugPrint('🔴 [RC] 결제 실패 (기타): $e');
-      return PurchaseResult.error('결제 중 오류가 발생했어요');
-    }
+  /// ═══════════════════════════════════════════════════
+/// ⭐ 결제 (purchases_flutter 8.x API)
+///
+/// 결제 직후엔 RC 서버 검증이 늦을 수 있어 최대 3회 재조회
+/// ═══════════════════════════════════════════════════
+static Future<PurchaseResult> purchase(Package package) async {
+  if (!_initialized) {
+    return PurchaseResult.error('RC가 초기화되지 않았습니다');
   }
+
+  try {
+    final customerInfo = await Purchases.purchasePackage(package);
+
+    // 1차: 즉시 확인
+    if (customerInfo.entitlements.active[entitlementId] != null) {
+      debugPrint('✅ [RC] 결제 완료, Pro 활성화 (즉시): $entitlementId');
+      return PurchaseResult.success();
+    }
+
+    // 2차: RC 서버 검증 대기 후 재조회
+    debugPrint('⏳ [RC] entitlement 활성화 대기 중...');
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      await Future.delayed(Duration(seconds: attempt * 2)); // 2s, 4s, 6s
+      try {
+        final retryInfo = await Purchases.getCustomerInfo();
+        if (retryInfo.entitlements.active[entitlementId] != null) {
+          debugPrint('✅ [RC] 결제 완료, Pro 활성화 (재시도 $attempt회차)');
+          return PurchaseResult.success();
+        }
+      } catch (e) {
+        debugPrint('⚠️ [RC] 재시도 $attempt 실패: $e');
+      }
+    }
+
+    // 3차: 그래도 안 되면 restore 시도 (마지막 수단)
+    debugPrint('🔄 [RC] 자동 복원 시도');
+    try {
+      final restored = await Purchases.restorePurchases();
+      if (restored.entitlements.active[entitlementId] != null) {
+        debugPrint('✅ [RC] 결제 완료, Pro 활성화 (복원)');
+        return PurchaseResult.success();
+      }
+    } catch (e) {
+      debugPrint('⚠️ [RC] 자동 복원 실패: $e');
+    }
+
+    debugPrint('🔴 [RC] 결제는 됐는데 entitlement 활성화 안 됨');
+    return PurchaseResult.error(
+        '결제는 처리됐어요. 잠시 후 "이전 구매 복원"을 눌러주세요');
+  } on PlatformException catch (e) {
+    final errorCode = PurchasesErrorHelper.getErrorCode(e);
+    if (errorCode == PurchasesErrorCode.purchaseCancelledError) {
+      debugPrint('⏸️ [RC] 사용자가 결제 취소');
+      return PurchaseResult.userCancelled();
+    }
+    debugPrint('🔴 [RC] 결제 실패: $errorCode / ${e.message}');
+    return PurchaseResult.error(_errorMessageKr(errorCode, e.message));
+  } catch (e) {
+    debugPrint('🔴 [RC] 결제 실패 (기타): $e');
+    return PurchaseResult.error('결제 중 오류가 발생했어요');
+  }
+}
 
   /// 구매 복원
   static Future<RestoreResult> restorePurchases() async {

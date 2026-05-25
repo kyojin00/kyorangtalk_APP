@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/chat_room_model.dart';
 import '../models/message_model.dart';
+import '../services/message_cache_service.dart';
 
 final _supabase = Supabase.instance.client;
 
@@ -11,8 +12,15 @@ String? currentOpenRoomId;
 const int kInitialMessageLimit = 50;
 const int kMoreMessageLimit = 50;
 
+// ⭐ Prefetch 설정
+const int kPrefetchTopN = 7;                              // 상위 7개 방 미리 로드
+const Duration kPrefetchFreshness = Duration(minutes: 1); // 1분 이내 캐시는 skip
+
 // 방별 hidden_at 캐시 (메시지 조회 시 필터링용)
 final Map<String, DateTime?> _roomHiddenAtCache = {};
+
+// ⭐ Prefetch 중복 방지
+final Set<String> _prefetchInFlight = {};
 
 class _RoomMessageController {
   final String roomId;
@@ -20,7 +28,7 @@ class _RoomMessageController {
   List<MessageModel> messages = [];
   bool hasMore = true;
   bool isLoadingMore = false;
-  DateTime? hiddenAt;  // ⭐ 메시지 필터링 기준점
+  DateTime? hiddenAt;
 
   _RoomMessageController(this.roomId, this.stream);
 
@@ -34,7 +42,6 @@ class _RoomMessageController {
 
 final Map<String, _RoomMessageController> _activeControllers = {};
 
-// ⭐ 방별 hidden_at 조회 (메시지 조회 전 호출)
 Future<DateTime?> _getHiddenAt(String roomId) async {
   final user = _supabase.auth.currentUser;
   if (user == null) return null;
@@ -48,8 +55,6 @@ Future<DateTime?> _getHiddenAt(String roomId) async {
         .maybeSingle();
 
     if (state == null) return null;
-
-    // cleared_at이 있으면 복원됨 → 필터 없음
     if (state['cleared_at'] != null) return null;
 
     final hiddenAtStr = state['hidden_at'] as String?;
@@ -62,16 +67,102 @@ Future<DateTime?> _getHiddenAt(String roomId) async {
 }
 
 // ═══════════════════════════════════════════════
+// ⭐ Prefetch (앱 시작 시 백그라운드 사전 로드)
+// ═══════════════════════════════════════════════
+void prefetchTopDMRooms(List<ChatRoomModel> rooms) {
+  for (final room in rooms.take(kPrefetchTopN)) {
+    _prefetchDMMessages(room.roomId);
+  }
+}
+
+Future<void> _prefetchDMMessages(String roomId) async {
+  if (_prefetchInFlight.contains(roomId)) return;
+  if (_activeControllers.containsKey(roomId)) return; // 이미 화면 열림
+
+  // 신선한 캐시 있으면 skip
+  final existing = MessageCacheService.loadDM(roomId);
+  if (existing != null &&
+      DateTime.now().difference(existing.savedAt) < kPrefetchFreshness) {
+    return;
+  }
+
+  _prefetchInFlight.add(roomId);
+  try {
+    final hiddenAt = await _getHiddenAt(roomId);
+
+    var query = _supabase
+        .from('kyorangtalk_messages')
+        .select('*')
+        .eq('room_id', roomId);
+
+    if (hiddenAt != null) {
+      query = query.gte('created_at', hiddenAt.toIso8601String());
+    }
+
+    final data = await query
+        .order('created_at', ascending: false)
+        .limit(kInitialMessageLimit);
+
+    final messages = data.map((e) => MessageModel.fromJson(e)).toList();
+
+    await MessageCacheService.saveDM(
+      roomId: roomId,
+      messages: messages,
+      hiddenAt: hiddenAt,
+      hasMore: messages.length >= kInitialMessageLimit,
+    );
+    print('✅ [prefetchDM] $roomId (${messages.length}개)');
+  } catch (e) {
+    print('🔴 [prefetchDM] 실패 ($roomId): $e');
+  } finally {
+    _prefetchInFlight.remove(roomId);
+  }
+}
+
+// ═══════════════════════════════════════════════
+// ⭐ 실시간 캐시 갱신
+// 사용자가 그 방을 안 보고 있어도 새 메시지가 오면 캐시에 추가
+// → 그 방에 들어갈 때 항상 최신 상태 (로딩 X)
+// ═══════════════════════════════════════════════
+Future<void> _appendToDMCache(
+    String roomId, Map<String, dynamic> newRow) async {
+  // 이미 화면 열려 있으면 provider가 처리하므로 skip
+  if (_activeControllers.containsKey(roomId)) return;
+
+  final existing = MessageCacheService.loadDM(roomId);
+  if (existing == null) return; // 캐시가 없으면 (prefetch 안 된 방) skip
+
+  try {
+    final msg = MessageModel.fromJson(newRow);
+
+    // hidden_at 이전 메시지는 skip
+    if (existing.hiddenAt != null &&
+        msg.createdAt.isBefore(existing.hiddenAt!)) {
+      return;
+    }
+
+    if (existing.messages.any((m) => m.id == msg.id)) return;
+
+    final updated = [...existing.messages, msg];
+    await MessageCacheService.saveDM(
+      roomId: roomId,
+      messages: updated,
+      hiddenAt: existing.hiddenAt,
+      hasMore: existing.hasMore,
+    );
+  } catch (e) {
+    print('🔴 [_appendToDMCache] $roomId: $e');
+  }
+}
+
+// ═══════════════════════════════════════════════
 // 채팅 목록 (실시간)
-//
-// ⭐ 성능 패치 (2026-05):
-//   1) sub_profiles !inner join → RPC get_visible_sub_profiles
-//   2) unread row 통째로 받기 → RPC get_unread_counts_for_rooms
-//   3) scheduleRefetch debounce 300ms → 500ms
 // ═══════════════════════════════════════════════
 final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
   final user = _supabase.auth.currentUser!;
   final controller = StreamController<List<ChatRoomModel>>();
+
+  bool didPrefetch = false; // ⭐ NEW: 첫 fetch 후에만 prefetch
 
   Future<List<ChatRoomModel>> fetchRooms() async {
     final rooms = await _supabase
@@ -213,6 +304,12 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
 
   fetchRooms().then((data) {
     if (!controller.isClosed) controller.add(data);
+
+    // ⭐ NEW: 첫 fetch 후 상위 N개 방 백그라운드 사전 로드
+    if (!didPrefetch && data.isNotEmpty) {
+      didPrefetch = true;
+      prefetchTopDMRooms(data);
+    }
   }).catchError((e) {
     print('🔴 chatRooms 초기 로드 실패: $e');
   });
@@ -244,6 +341,13 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
           if (row.isEmpty) return;
           final senderId = row['sender_id'] as String?;
           if (senderId == user.id) return;
+
+          // ⭐ NEW: 화면 안 열려 있는 방의 캐시에 새 메시지 자동 추가
+          final roomId = row['room_id'] as String?;
+          if (roomId != null) {
+            _appendToDMCache(roomId, row);
+          }
+
           scheduleRefetch();
         },
       )
@@ -286,7 +390,6 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
 
 // ═══════════════════════════════════════════════
 // 메시지 목록 (페이지네이션 + 실시간)
-// ⭐ hidden_at 이후 메시지만 표시
 // ═══════════════════════════════════════════════
 final messagesProvider =
     StreamProvider.autoDispose.family<List<MessageModel>, String>((ref, roomId) {
@@ -296,6 +399,20 @@ final messagesProvider =
   final ctrl = _RoomMessageController(roomId, streamController);
   _activeControllers[roomId] = ctrl;
 
+  // ⭐ ① 디스크 캐시(Hive)에 스냅샷이 있으면 즉시 복원 → 로딩 스킵
+  final snapshot = MessageCacheService.loadDM(roomId);
+  final hasCachedData = snapshot != null;
+  if (hasCachedData) {
+    ctrl.messages = List.of(snapshot.messages);
+    ctrl.hiddenAt = snapshot.hiddenAt;
+    ctrl.hasMore = snapshot.hasMore;
+    ctrl.emit();
+    print('⚡ [messages] 스냅샷 복원: $roomId '
+        '(${snapshot.messages.length}개, '
+        '${DateTime.now().difference(snapshot.savedAt).inSeconds}s 전)');
+  }
+
+  // ⭐ ② 백그라운드로 fresh 데이터 fetch + 머지
   () async {
     final hiddenAt = await _getHiddenAt(roomId);
     ctrl.hiddenAt = hiddenAt;
@@ -313,10 +430,31 @@ final messagesProvider =
         .order('created_at', ascending: false)
         .limit(kInitialMessageLimit);
 
-    final initial = data.map((e) => MessageModel.fromJson(e)).toList();
-    ctrl.messages = initial;
-    ctrl.hasMore = initial.length >= kInitialMessageLimit;
-    ctrl.emit();
+    final fresh = data.map((e) => MessageModel.fromJson(e)).toList();
+
+    if (streamController.isClosed) return;
+
+    if (hasCachedData) {
+      final filtered = hiddenAt != null
+          ? ctrl.messages
+              .where((m) => !m.createdAt.isBefore(hiddenAt))
+              .toList()
+          : ctrl.messages;
+
+      final existingIds = filtered.map((m) => m.id).toSet();
+      final newOnes =
+          fresh.where((m) => !existingIds.contains(m.id)).toList();
+
+      if (newOnes.isNotEmpty || filtered.length != ctrl.messages.length) {
+        ctrl.messages = [...filtered, ...newOnes];
+        print('⚡ [messages] 머지: $roomId (+${newOnes.length}개)');
+      }
+      ctrl.emit();
+    } else {
+      ctrl.messages = fresh;
+      ctrl.hasMore = fresh.length >= kInitialMessageLimit;
+      ctrl.emit();
+    }
 
     if (currentOpenRoomId == roomId) {
       _supabase
@@ -377,7 +515,7 @@ final messagesProvider =
           final id = updated['id'] as String?;
           final isRead = updated['is_read'] as bool? ?? false;
           final isDeleted = updated['is_deleted'] as bool? ?? false;
-          final content = updated['content'] as String?;      // ⭐ NEW
+          final content = updated['content'] as String?;
           final transcript = updated['audio_transcript'] as String?;
           final transcriptStatus =
               updated['audio_transcript_status'] as String?;
@@ -385,7 +523,7 @@ final messagesProvider =
           ctrl.messages = ctrl.messages.map((m) {
             if (m.id == id) {
               return m.copyWith(
-                content: content,                              // ⭐ NEW
+                content: content,
                 isRead: isRead,
                 isDeleted: isDeleted,
                 audioTranscript: transcript,
@@ -400,6 +538,13 @@ final messagesProvider =
       .subscribe();
 
   ref.onDispose(() {
+    MessageCacheService.saveDM(
+      roomId: roomId,
+      messages: ctrl.messages,
+      hiddenAt: ctrl.hiddenAt,
+      hasMore: ctrl.hasMore,
+    );
+
     _supabase.removeChannel(channel);
     streamController.close();
     _activeControllers.remove(roomId);
@@ -482,8 +627,8 @@ Future<void> sendMessage({
   String? fileName,
   int? fileSize,
   String? fileType,
-  String? locationShareId,            // 📍
-  String? scheduleEventId,            // 📅
+  String? locationShareId,
+  String? scheduleEventId,
 }) async {
   await _supabase.from('kyorangtalk_messages').insert({
     'room_id':    roomId,
@@ -504,8 +649,8 @@ Future<void> sendMessage({
     if (fileName != null)               'file_name':         fileName,
     if (fileSize != null)               'file_size':         fileSize,
     if (fileType != null)               'file_type':         fileType,
-    if (locationShareId != null)        'location_share_id': locationShareId,   // 📍
-    if (scheduleEventId != null)        'schedule_event_id': scheduleEventId,   // 📅
+    if (locationShareId != null)        'location_share_id': locationShareId,
+    if (scheduleEventId != null)        'schedule_event_id': scheduleEventId,
   });
 
   String lastMessageText;
@@ -556,6 +701,8 @@ Future<void> hideChatRoom(String roomId) async {
       'kyorangtalk_leave_room',
       params: {'p_room_id': roomId},
     );
+    MessageCacheService.removeDM(roomId);
+    _roomHiddenAtCache.remove(roomId);
   } catch (e) {
     print('🔴 채팅방 나가기 실패: $e');
     rethrow;
@@ -569,6 +716,8 @@ Future<void> restoreChatRoom(String roomId) async {
       'kyorangtalk_restore_room',
       params: {'p_room_id': roomId},
     );
+    MessageCacheService.removeDM(roomId);
+    _roomHiddenAtCache.remove(roomId);
   } catch (e) {
     print('🔴 채팅방 복원 실패: $e');
     rethrow;

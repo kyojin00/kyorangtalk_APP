@@ -99,12 +99,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       final uriScheme  = state.uri.scheme;
       final uriHost    = state.uri.host;
 
-      // ⭐ 디버그 로그
       print('🔗 [Router redirect] '
           'matched=$loc | full=$fullPath | '
           'scheme=$uriScheme | host=$uriHost | path=$uriPath');
 
-      // ⭐⭐⭐ 딥링크 URI 가로채기
       final isDeepLink =
           uriScheme == 'kyorangtalk' ||
           uriHost == 'open.kyorang.com' ||
@@ -141,7 +139,6 @@ final routerProvider = Provider<GoRouter>((ref) {
 
       return null;
     },
-    // ⭐ 라우트 매칭 실패 시 (페이지 낫 파운드 예외 가로채기)
     onException: (context, state, router) {
       print('🔗 [Router] onException: ${state.uri}');
       final uri = state.uri;
@@ -209,11 +206,11 @@ class KyorangTalkApp extends ConsumerWidget {
         AppTheme.setDark(isDark);
 
         // ⭐ Stack 구성 (아래에서 위로 쌓임):
-        //   1) child            — 실제 라우터 화면
-        //   2) CallRouter       — 들어오는 통화 감지 → IncomingCallScreen push
-        //   3) OngoingCallBanner — 통화 중일 때 상단에 떠 있는 복귀 배너
+        //   1) child         — 실제 라우터 화면
+        //   2) CallRouter    — 들어오는 통화 감지 → IncomingCallScreen push
         //
-        // ⭐ AppLockGuard로 감싸서 라이프사이클 가드 (백그라운드 → 잠금)
+        // 보이스 룸은 Android 포그라운드 서비스 알림창에서 관리하므로
+        // 앱 위에 떠있는 미니바는 제거함.
         return KeyedSubtree(
           key: ValueKey<bool>(isDark),
           child: AppLockGuard(

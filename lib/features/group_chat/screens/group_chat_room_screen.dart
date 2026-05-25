@@ -22,6 +22,9 @@ import '../../chat/services/pending_message_store.dart';
 import '../../chat/services/draft_store.dart';
 import '../../chat/providers/reaction_provider.dart';
 import '../../polls/widgets/create_poll_sheet.dart';
+import '../../reports/providers/report_provider.dart'; // ⭐ NEW
+import '../../reports/widgets/report_dialog.dart';      // ⭐ NEW
+import '../../voice_room/widgets/voice_room_banner.dart';
 import '../models/group_room_model.dart';
 import '../models/group_message_model.dart';
 import '../providers/group_chat_provider.dart';
@@ -84,6 +87,9 @@ class _GroupChatRoomScreenState
   int _memberCount = 0;
   RealtimeChannel? _memberChannel;
 
+  // ⭐ NEW: 슬라이드 인 애니메이션 대상 메시지 ID
+  final Set<String> _animatingMessageIds = {};
+
   @override
   void initState() {
     super.initState();
@@ -110,6 +116,9 @@ class _GroupChatRoomScreenState
     });
 
     _scrollController.addListener(_handleScroll);
+
+    // ⭐ 보이스 룸 Edge Function 미리 깨우기
+    _warmupVoiceRoomTokenFunction();
   }
 
   // ═══════════════════════════════════════════════════
@@ -149,6 +158,23 @@ class _GroupChatRoomScreenState
       }
     } catch (e) {
       print('멤버 카운트 새로고침 실패: $e');
+    }
+  }
+
+  /// ⭐ 그룹 채팅방 진입 후 Edge Function 을 warmup 모드로 호출.
+  Future<void> _warmupVoiceRoomTokenFunction() async {
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (_disposed) return;
+
+    try {
+      final sw = Stopwatch()..start();
+      final res = await Supabase.instance.client.functions.invoke(
+        'agora_token_voice_room',
+        body: const {'warmup': true},
+      ).timeout(const Duration(seconds: 5));
+      print('🔥 보이스 룸 함수 warmup 완료 (${sw.elapsedMilliseconds}ms) status=${res.status}');
+    } catch (e) {
+      print('🔥 보이스 룸 함수 warmup 실패: $e');
     }
   }
 
@@ -239,7 +265,6 @@ class _GroupChatRoomScreenState
     _disposed = true;
     currentOpenGroupRoomId = null;
 
-    // ⭐ 멤버 채널 해제
     if (_memberChannel != null) {
       Supabase.instance.client.removeChannel(_memberChannel!);
     }
@@ -350,8 +375,7 @@ class _GroupChatRoomScreenState
     }
   }
 
-  // 📅 일정 잡기
-Future<void> _shareSchedule() async {
+  Future<void> _shareSchedule() async {
     final event = await showScheduleCreateSheet(
       context,
       roomId:   widget.room.id,
@@ -730,6 +754,18 @@ Future<void> _shareSchedule() async {
     _showSnack('메시지가 복사됐어요');
   }
 
+  // ⭐ NEW: 메시지 신고 (자동 차단 포함)
+  Future<void> _reportMessage(GroupMessageModel msg) async {
+    await showReportMessageDialog(
+      context: context,
+      messageId: msg.id,
+      senderId: msg.senderId,
+      roomId: widget.room.id,
+      messageContent: msg.content,
+      senderNickname: msg.senderNickname ?? '알 수 없음',
+    );
+  }
+
   void _showSnack(String msg) {
     if (_disposed || !mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -815,6 +851,21 @@ Future<void> _shareSchedule() async {
                 },
               ),
 
+            // ⭐ NEW: 신고 (남의 메시지만, 삭제 안 된 것만)
+            if (!isMe && !msg.isDeleted)
+              ListTile(
+                leading: const Icon(Icons.flag_outlined,
+                    color: Color(0xFFFBBF24)),
+                title: Text('신고',
+                    style: TextStyle(
+                        color: AppTheme.textMain,
+                        fontWeight: FontWeight.w600)),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _reportMessage(msg);
+                },
+              ),
+
             if (isMe && !msg.isDeleted)
               ListTile(
                 leading: const Icon(Icons.delete_outline_rounded,
@@ -845,7 +896,7 @@ Future<void> _shareSchedule() async {
     ).then((_) {
       if (!_disposed && mounted) {
         _loadMuteStatus();
-        _refreshMemberCount(); // ⭐ 정보 화면 다녀온 후 멤버 수도 갱신
+        _refreshMemberCount();
       }
     });
   }
@@ -911,21 +962,33 @@ Future<void> _shareSchedule() async {
         ref.watch(hasRoomAdminProvider(widget.room.id));
     final hasAdmin = hasAdminAsync.value ?? true;
 
+    // ⭐ NEW: 차단된 사용자 ID 목록 (실시간)
+    final blockedIds =
+        ref.watch(blockedUserIdsProvider).value ?? <String>{};
+
     ref.listen(groupMessagesProvider(widget.room.id), (prev, next) {
       if (_disposed) return;
       next.whenData((msgs) {
         if (_disposed) return;
 
-        _updateMessageCaches(msgs);
+        // ⭐ 차단된 사용자 메시지 필터링
+        final filteredMsgs = msgs
+            .where((m) => !blockedIds.contains(m.senderId))
+            .toList();
+
+        _updateMessageCaches(filteredMsgs);
 
         if (prev?.value == null) {
           _forceInitialScroll();
           return;
         }
 
-        final prevIds = prev!.value!.map((m) => m.id).toSet();
+        final prevFiltered = prev!.value!
+            .where((m) => !blockedIds.contains(m.senderId))
+            .toList();
+        final prevIds = prevFiltered.map((m) => m.id).toSet();
         final newMessages =
-            msgs.where((m) => !prevIds.contains(m.id)).toList();
+            filteredMsgs.where((m) => !prevIds.contains(m.id)).toList();
 
         if (newMessages.isNotEmpty) {
           if (_optimisticMessages.isNotEmpty) {
@@ -952,6 +1015,28 @@ Future<void> _shareSchedule() async {
             }
           }
 
+          // ⭐ NEW: 상대방이 보낸 새 메시지에 슬라이드 인 효과
+          //   자신 메시지는 옵티미스틱으로 이미 표시되어 있어 제외
+          //   system 메시지도 제외 (정적이라 자연스러움)
+          final newOtherMessages = newMessages
+              .where((m) => m.senderId != _myId && m.msgType != 'system')
+              .toList();
+          if (newOtherMessages.isNotEmpty) {
+            setState(() {
+              for (final m in newOtherMessages) {
+                _animatingMessageIds.add(m.id);
+              }
+            });
+            Future.delayed(const Duration(milliseconds: 800), () {
+              if (!_disposed && mounted) {
+                setState(() {
+                  _animatingMessageIds
+                      .removeAll(newOtherMessages.map((m) => m.id));
+                });
+              }
+            });
+          }
+
           final sortedNew = [...newMessages]
             ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
           final latestNew = sortedNew.last;
@@ -966,7 +1051,6 @@ Future<void> _shareSchedule() async {
             _scheduleMarkAsRead();
           }
 
-          // ⭐ 시스템 메시지(입장/퇴장)가 있으면 멤버 수 갱신
           final hasSystemMsg =
               newMessages.any((m) => m.msgType == 'system');
           if (hasSystemMsg) {
@@ -979,7 +1063,6 @@ Future<void> _shareSchedule() async {
     return Scaffold(
       backgroundColor: AppTheme.bg,
       resizeToAvoidBottomInset: true,
-      // ⭐ 실시간 memberCount 전달
       appBar: buildGroupChatAppBar(
         context: context,
         room: widget.room,
@@ -993,178 +1076,22 @@ Future<void> _shareSchedule() async {
         bottom: false,
         child: Column(
           children: [
+            VoiceRoomBanner(groupRoomId: widget.room.id),
+
             Expanded(
               child: msgsAsync.when(
-                loading: () => const Center(
-                    child: CircularProgressIndicator(
-                        color: AppTheme.primary)),
+                // ⭐ 카톡식: 로딩 스피너 대신 빈 채팅창
+                loading: () => const SizedBox.expand(),
                 error: (e, _) => Center(
                     child: Text('오류: $e',
                         style:
                             TextStyle(color: AppTheme.textSub))),
-                data: (messages) {
-                  if (messages.isEmpty &&
-                      _failedMessages.isEmpty &&
-                      _optimisticMessages.isEmpty) {
-                    return GroupEmptyState(roomName: widget.room.name);
-                  }
-
-                  final groups = _getGroupedMessages(messages);
-                  final items = <_ListItem>[];
-
-                  if (_isPaginating) {
-                    items.add(_ListItem.loadingIndicator());
-                  } else if (_noMoreMessages) {
-                    items.add(_ListItem.startOfChatMarker());
-                  }
-
-                  for (final group in groups) {
-                    items.add(_ListItem.dateDivider(group.label));
-                    for (int i = 0; i < group.items.length; i++) {
-                      final msg = group.items[i];
-                      final prev = i > 0 ? group.items[i - 1] : null;
-                      items.add(_ListItem.message(msg, prev));
-                    }
-                  }
-
-                  if (_optimisticMessages.isNotEmpty) {
-                    final sortedOptimistic =
-                        _optimisticMessages.values.toList()
-                          ..sort((a, b) =>
-                              a.createdAt.compareTo(b.createdAt));
-                    for (final o in sortedOptimistic) {
-                      items.add(_ListItem.optimistic(o));
-                    }
-                  }
-
-                  if (_failedMessages.isNotEmpty) {
-                    final sortedFailed = [..._failedMessages]
-                      ..sort((a, b) =>
-                          a.createdAt.compareTo(b.createdAt));
-                    for (final f in sortedFailed) {
-                      items.add(_ListItem.failedMessage(f));
-                    }
-                  }
-
-                  return ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 12),
-                    itemCount: items.length,
-                    cacheExtent: 1000,
-                    addAutomaticKeepAlives: false,
-                    addRepaintBoundaries: true,
-                    itemBuilder: (ctx, index) {
-                      final item = items[index];
-
-                      if (item.isLoadingIndicator) {
-                        return const Padding(
-                          padding:
-                              EdgeInsets.symmetric(vertical: 12),
-                          child: Center(
-                            child: SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: AppTheme.primary,
-                              ),
-                            ),
-                          ),
-                        );
-                      }
-
-                      if (item.isStartOfChatMarker) {
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(
-                              vertical: 16),
-                          child: Center(
-                            child: Text(
-                              '대화의 시작이에요',
-                              style: TextStyle(
-                                color: AppTheme.textMuted,
-                                fontSize: 11,
-                              ),
-                            ),
-                          ),
-                        );
-                      }
-
-                      if (item.isDivider) {
-                        return _DateDivider(label: item.dateLabel!);
-                      }
-
-                      if (item.isOptimistic) {
-                        final o = item.optimistic!;
-                        return RepaintBoundary(
-                          key: ValueKey('opt_${o.localId}'),
-                          child: _OptimisticBubble(
-                            content: o.content,
-                            timeStr: _timeStr(o.createdAt),
-                          ),
-                        );
-                      }
-
-                      if (item.isFailedMessage) {
-                        final f = item.failedMessage!;
-                        return RepaintBoundary(
-                          key: ValueKey('failed_${f.id}'),
-                          child: FailedMessageBubble(
-                            message: f,
-                            timeStr: _timeStr(f.createdAt),
-                            isRetrying:
-                                _retryingIds.contains(f.id),
-                            onRetry: () => _retryFailedMessage(f),
-                            onCancel: () => _cancelFailedMessage(f),
-                          ),
-                        );
-                      }
-
-                      final msg = item.message!;
-
-                      if (msg.msgType == 'system') {
-                        return SystemMessage(content: msg.content);
-                      }
-
-                      final prev = item.prevMessage;
-                      final isMe = msg.senderId == _myId;
-                      final isPrevSystem = prev?.msgType == 'system';
-                      final showSenderInfo = !isMe &&
-                          (prev?.senderId != msg.senderId ||
-                              isPrevSystem);
-                      final key = _getKeyFor(msg.id);
-
-                      return GestureDetector(
-                        key: key,
-                        onLongPress: () => _showMessageOptions(msg),
-                        child: GroupMessageBubble(
-                          msg: msg,
-                          roomId: widget.room.id,
-                          isMe: isMe,
-                          showSenderInfo: showSenderInfo,
-                          timeStr: _timeStr(msg.createdAt),
-                          onAvatarTap: isMe
-                              ? null
-                              : () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) =>
-                                          UserProfileScreen(
-                                        userId: msg.senderId,
-                                        nickname:
-                                            msg.senderNickname ??
-                                                '알 수 없음',
-                                        avatarUrl:
-                                            msg.senderAvatar,
-                                      ),
-                                    ),
-                                  );
-                                },
-                        ),
-                      );
-                    },
-                  );
+                data: (rawMessages) {
+                  // 차단된 사용자 메시지 필터링
+                  final messages = rawMessages
+                      .where((m) => !blockedIds.contains(m.senderId))
+                      .toList();
+                  return _buildMessageList(messages);
                 },
               ),
             ),
@@ -1191,6 +1118,195 @@ Future<void> _shareSchedule() async {
           ],
         ),
       ),
+    );
+  }
+
+  // ⭐ NEW: 빈 채팅창 ↔ 메시지 리스트를 AnimatedSwitcher로 부드럽게 전환
+  Widget _buildMessageList(List<GroupMessageModel> messages) {
+    final isEmpty = messages.isEmpty &&
+        _failedMessages.isEmpty &&
+        _optimisticMessages.isEmpty;
+
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 350),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      child: isEmpty
+          ? KeyedSubtree(
+              key: const ValueKey('empty_state'),
+              child: GroupEmptyState(roomName: widget.room.name),
+            )
+          : KeyedSubtree(
+              key: const ValueKey('message_list'),
+              child: _buildListView(messages),
+            ),
+    );
+  }
+
+  Widget _buildListView(List<GroupMessageModel> messages) {
+    final groups = _getGroupedMessages(messages);
+    final items = <_ListItem>[];
+
+    if (_isPaginating) {
+      items.add(_ListItem.loadingIndicator());
+    } else if (_noMoreMessages) {
+      items.add(_ListItem.startOfChatMarker());
+    }
+
+    for (final group in groups) {
+      items.add(_ListItem.dateDivider(group.label));
+      for (int i = 0; i < group.items.length; i++) {
+        final msg = group.items[i];
+        final prev = i > 0 ? group.items[i - 1] : null;
+        items.add(_ListItem.message(msg, prev));
+      }
+    }
+
+    if (_optimisticMessages.isNotEmpty) {
+      final sortedOptimistic =
+          _optimisticMessages.values.toList()
+            ..sort((a, b) =>
+                a.createdAt.compareTo(b.createdAt));
+      for (final o in sortedOptimistic) {
+        items.add(_ListItem.optimistic(o));
+      }
+    }
+
+    if (_failedMessages.isNotEmpty) {
+      final sortedFailed = [..._failedMessages]
+        ..sort((a, b) =>
+            a.createdAt.compareTo(b.createdAt));
+      for (final f in sortedFailed) {
+        items.add(_ListItem.failedMessage(f));
+      }
+    }
+
+    return ListView.builder(
+      controller: _scrollController,
+      padding: const EdgeInsets.symmetric(
+          horizontal: 16, vertical: 12),
+      itemCount: items.length,
+      cacheExtent: 1000,
+      addAutomaticKeepAlives: false,
+      addRepaintBoundaries: true,
+      itemBuilder: (ctx, index) {
+        final item = items[index];
+
+        if (item.isLoadingIndicator) {
+          return const Padding(
+            padding:
+                EdgeInsets.symmetric(vertical: 12),
+            child: Center(
+              child: SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppTheme.primary,
+                ),
+              ),
+            ),
+          );
+        }
+
+        if (item.isStartOfChatMarker) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(
+                vertical: 16),
+            child: Center(
+              child: Text(
+                '대화의 시작이에요',
+                style: TextStyle(
+                  color: AppTheme.textMuted,
+                  fontSize: 11,
+                ),
+              ),
+            ),
+          );
+        }
+
+        if (item.isDivider) {
+          return _DateDivider(label: item.dateLabel!);
+        }
+
+        if (item.isOptimistic) {
+          final o = item.optimistic!;
+          return RepaintBoundary(
+            key: ValueKey('opt_${o.localId}'),
+            child: _OptimisticBubble(
+              content: o.content,
+              timeStr: _timeStr(o.createdAt),
+            ),
+          );
+        }
+
+        if (item.isFailedMessage) {
+          final f = item.failedMessage!;
+          return RepaintBoundary(
+            key: ValueKey('failed_${f.id}'),
+            child: FailedMessageBubble(
+              message: f,
+              timeStr: _timeStr(f.createdAt),
+              isRetrying:
+                  _retryingIds.contains(f.id),
+              onRetry: () => _retryFailedMessage(f),
+              onCancel: () => _cancelFailedMessage(f),
+            ),
+          );
+        }
+
+        final msg = item.message!;
+
+        if (msg.msgType == 'system') {
+          return SystemMessage(content: msg.content);
+        }
+
+        final prev = item.prevMessage;
+        final isMe = msg.senderId == _myId;
+        final isPrevSystem = prev?.msgType == 'system';
+        final showSenderInfo = !isMe &&
+            (prev?.senderId != msg.senderId ||
+                isPrevSystem);
+        final key = _getKeyFor(msg.id);
+
+        final bubble = GestureDetector(
+          key: key,
+          onLongPress: () => _showMessageOptions(msg),
+          child: GroupMessageBubble(
+            msg: msg,
+            roomId: widget.room.id,
+            isMe: isMe,
+            showSenderInfo: showSenderInfo,
+            timeStr: _timeStr(msg.createdAt),
+            onAvatarTap: isMe
+                ? null
+                : () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) =>
+                            UserProfileScreen(
+                          userId: msg.senderId,
+                          nickname:
+                              msg.senderNickname ??
+                                  '알 수 없음',
+                          avatarUrl:
+                              msg.senderAvatar,
+                        ),
+                      ),
+                    );
+                  },
+          ),
+        );
+
+        // ⭐ NEW: 막 도착한 메시지에만 슬라이드 인 효과
+        final shouldAnimate = _animatingMessageIds.contains(msg.id);
+
+        return RepaintBoundary(
+          key: ValueKey('msg_${msg.id}'),
+          child: shouldAnimate ? _SlideInWrapper(child: bubble) : bubble,
+        );
+      },
     );
   }
 }
@@ -1405,4 +1521,58 @@ class _ListItem {
 
   bool get isFailedMessage => failedMessage != null;
   bool get isOptimistic => optimistic != null;
+}
+
+// ═══════════════════════════════════════════════════
+// ⭐ NEW: 새 메시지 슬라이드 인 애니메이션 wrapper
+// 막 도착한 메시지가 살짝 아래에서 떠오르며 fade-in되는 효과
+// ═══════════════════════════════════════════════════
+class _SlideInWrapper extends StatefulWidget {
+  final Widget child;
+  const _SlideInWrapper({required this.child});
+
+  @override
+  State<_SlideInWrapper> createState() => _SlideInWrapperState();
+}
+
+class _SlideInWrapperState extends State<_SlideInWrapper>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<Offset> _offset;
+  late final Animation<double> _opacity;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    );
+    _offset = Tween<Offset>(
+      begin: const Offset(0, 0.15),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOutCubic,
+    ));
+    _opacity = Tween<double>(begin: 0, end: 1).animate(_controller);
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: SlideTransition(
+        position: _offset,
+        child: widget.child,
+      ),
+    );
+  }
 }
