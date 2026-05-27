@@ -743,8 +743,12 @@ class _GroupChatRoomScreenState
 
   Future<void> _deleteMessage(String messageId) async {
     await Supabase.instance.client
-        .from('kyorangtalk_group_messages')
-        .update({'is_deleted': true, 'content': '삭제된 메시지예요'})
+        .from('kyorangtalk_messages')
+        .update({
+          'is_deleted': true,
+          'deleted_at': DateTime.now().toUtc().toIso8601String(),
+          // ⭐ content는 덮어쓰지 않음 — 수신자가 24시간 내 복원 가능
+        })
         .eq('id', messageId)
         .eq('sender_id', _myId);
   }

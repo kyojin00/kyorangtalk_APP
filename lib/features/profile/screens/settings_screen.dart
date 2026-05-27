@@ -6,11 +6,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/theme/theme_provider.dart';
 import '../../../shared/widgets/avatar_widget.dart';
+import '../../chat/screens/backup_screen.dart'; // ⭐ NEW: 서랍 = 백업 화면
 import '../../friends/screens/friends_screen.dart';
-import '../../subscription/screens/drawer_screen.dart';
 import '../../subscription/screens/subscription_screen.dart';
 import '../../subscription/services/subscription_service.dart';
-import 'app_lock_settings_screen.dart';                       // ⭐ NEW
+import 'app_lock_settings_screen.dart';
 import 'my_profile_screen.dart';
 import 'notification_settings_screen.dart';
 import 'blocked_users_screen.dart';
@@ -29,7 +29,8 @@ import 'privacy_management_screen.dart';
 // - 그룹화: 섹션별 카드 묶음 (그룹 구분 명확)
 // - 서랍 메뉴: 더 부각된 디자인
 // - 로그아웃: 빨간 톤 강조
-// - ⭐ 개인정보 섹션에 "앱 잠금" 메뉴 추가
+// - 개인정보 섹션에 "앱 잠금" 메뉴 추가
+// - ⭐ 서랍 = 백업 화면으로 통합 (DrawerScreen 사용 안 함)
 // ═══════════════════════════════════════════════════
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -407,11 +408,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     children: [
                       _DrawerMenuItem(
                         subAsync: subAsync,
+                        // ⭐ 변경: DrawerScreen → BackupScreen
                         onTap: () async {
                           await Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (_) => const DrawerScreen(),
+                              builder: (_) => const BackupScreen(),
                             ),
                           );
                           ref.invalidate(subscriptionProvider);
@@ -580,7 +582,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         ),
                       ),
                       _Divider(),
-                      // ⭐ NEW: 앱 잠금
                       _MenuItem(
                         icon: Icons.lock_outline_rounded,
                         iconColor: AppTheme.primary,
@@ -879,7 +880,7 @@ class _MenuItem extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════
-// 메시지 서랍 메뉴
+// 메시지 서랍 메뉴 (= 백업/복원 진입)
 // ═══════════════════════════════════════════════════
 class _DrawerMenuItem extends StatelessWidget {
   final AsyncValue<SubscriptionModel?> subAsync;
@@ -945,7 +946,7 @@ class _DrawerMenuItem extends StatelessWidget {
                         ),
                       ),
                       error: (_, __) => Text(
-                        '나간 채팅방 보관함',
+                        '메시지를 백업하고 복원할 수 있어요',
                         style: TextStyle(
                           fontSize: 11,
                           color: AppTheme.textSub,
@@ -956,7 +957,7 @@ class _DrawerMenuItem extends StatelessWidget {
                         return Text(
                           active
                               ? '서랍이 열려있어요'
-                              : '나간 채팅방의 옛 메시지를 다시 보세요',
+                              : '메시지를 백업하고 어디서든 복원하기',
                           style: TextStyle(
                             fontSize: 11,
                             color: active

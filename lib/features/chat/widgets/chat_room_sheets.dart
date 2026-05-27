@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
 import '../models/message_model.dart';
+import 'deleted_message_dialog.dart';
 
 // ═══════════════════════════════════════════════════
 // 💬 메시지 옵션 시트
@@ -8,6 +9,8 @@ import '../models/message_model.dart';
 Future<void> showMessageOptionsSheet(
   BuildContext context, {
   required MessageModel msg,
+  required String roomId,           // ⭐ NEW: 다이얼로그 호출용
+  required String partnerNickname,  // ⭐ NEW: 다이얼로그 호출용
   required bool isMe,
   required bool isAnyBlocked,
   required VoidCallback onReply,
@@ -40,7 +43,7 @@ Future<void> showMessageOptionsSheet(
               borderRadius: BorderRadius.circular(2),
             ),
           ),
-          if (!isAnyBlocked)
+          if (!isAnyBlocked && !msg.isDeleted)
             _sheetItem(context, Icons.reply_rounded, '답장',
                 AppTheme.textMain, onReply),
           if (!isSpecial && !msg.isDeleted)
@@ -52,6 +55,24 @@ Future<void> showMessageOptionsSheet(
           if (!isMe && !msg.isDeleted)
             _sheetItem(context, Icons.flag_outlined, '메시지 신고',
                 const Color(0xFFEF4444), onReport, bold: true),
+          // ⭐ NEW: 삭제된 메시지 — 수신자만 원본 보기 가능
+          if (!isMe && msg.isDeleted)
+            _sheetItem(
+              context,
+              Icons.lock_open_rounded,
+              '원본 보기',
+              AppTheme.primary,
+              () {
+                showRestoreDeletedDmDialog(
+                  context: context,
+                  messageId: msg.id,
+                  senderId: msg.senderId,
+                  roomId: roomId,
+                  senderNickname: partnerNickname,
+                );
+              },
+              bold: true,
+            ),
           if (isMe && !msg.isDeleted)
             _sheetItem(context, Icons.delete_outline, '삭제',
                 const Color(0xFFEF4444), onDelete, bold: true),

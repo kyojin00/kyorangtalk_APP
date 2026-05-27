@@ -8,39 +8,34 @@ import '../../group_chat/models/group_message_model.dart';
 // 💾 MessageCacheService
 //
 // Hive 기반 메시지 영구 캐시.
-// 앱 재시작 후에도 메시지가 즉시 표시되도록 디스크에 저장.
+//
+// ⭐ 정책 v3 기준 (2026.05):
+//   - 서버는 무료 사용자 메시지 30일만 보관
+//   - 로컬(Hive)은 영구 보관 역할 → 한도 대폭 확장
+//   - Pro 사용자만 클라우드 백업으로 기기 이전 가능
 //
 // 구조:
 //   - Hive Box ('kt_message_cache') 하나에 모든 방 저장
 //   - 키 형식: 'dm_<roomId>' 또는 'group_<roomId>'
 //   - 값: JSON String (messages + 메타데이터)
-//   - 방당 최근 200개 메시지, 총 30개 방 유지 (LRU)
-//
-// 동기/비동기:
-//   - load: 동기 (Hive 메모리 캐시 활용, ~수 ms)
-//   - save / remove: 비동기 (fire-and-forget으로 호출)
 // ═══════════════════════════════════════════════════
 class MessageCacheService {
   static const String _boxName = 'kt_message_cache';
-  static const int kMaxMessagesPerRoom = 200;
-  static const int kMaxRooms = 30;
+
+  static const int kMaxMessagesPerRoom = 5000;
+  static const int kMaxRooms = 500;
 
   static Box<String>? _box;
   static bool _initialized = false;
 
-  // LRU 추적 (방 ID 순서)
   static final List<String> _lru = [];
 
-  // ───────────────────────────────────────────────
-  // 초기화
-  // ───────────────────────────────────────────────
   static Future<void> init() async {
     if (_initialized) return;
     await Hive.initFlutter();
     _box = await Hive.openBox<String>(_boxName);
     _initialized = true;
 
-    // 기존 키들로 LRU 초기화 (마지막 저장 순서 알 수 없어 임의 순서)
     final keys = _box!.keys.cast<String>().toList();
     _lru.clear();
     _lru.addAll(keys
@@ -61,6 +56,172 @@ class MessageCacheService {
 
   static String _dmKey(String roomId) => 'dm_$roomId';
   static String _groupKey(String roomId) => 'group_$roomId';
+
+  // ───────────────────────────────────────────────
+  // 통계 / 백업용 API
+  // ───────────────────────────────────────────────
+
+  /// 캐시된 모든 DM 방 ID
+  static List<String> getAllCachedDmRoomIds() {
+    final box = _safeBox;
+    if (box == null) return [];
+    return box.keys
+        .cast<String>()
+        .where((k) => k.startsWith('dm_'))
+        .map((k) => k.substring(3))
+        .toList();
+  }
+
+  /// 캐시된 모든 그룹 방 ID
+  static List<String> getAllCachedGroupRoomIds() {
+    final box = _safeBox;
+    if (box == null) return [];
+    return box.keys
+        .cast<String>()
+        .where((k) => k.startsWith('group_'))
+        .map((k) => k.substring(6))
+        .toList();
+  }
+
+  /// 캐시된 모든 방 ID (dm + group 통합, 중복 제거)
+  static List<String> getAllCachedRoomIds() {
+    final ids = <String>{
+      ...getAllCachedDmRoomIds(),
+      ...getAllCachedGroupRoomIds(),
+    };
+    return ids.toList();
+  }
+
+  /// 전체 캐시 통계
+  static CacheStats getStats() {
+    final box = _safeBox;
+    if (box == null) {
+      return CacheStats(
+          dmRoomCount: 0,
+          groupRoomCount: 0,
+          totalMessages: 0,
+          totalBytes: 0);
+    }
+
+    int dmRooms = 0;
+    int grpRooms = 0;
+    int totalMsgs = 0;
+    int totalBytes = 0;
+
+    for (final key in box.keys.cast<String>()) {
+      final raw = box.get(key);
+      if (raw == null) continue;
+
+      totalBytes += raw.length;
+
+      if (key.startsWith('dm_')) dmRooms++;
+      if (key.startsWith('group_')) grpRooms++;
+
+      try {
+        final json = jsonDecode(raw) as Map<String, dynamic>;
+        final msgsJson = json['messages'];
+        if (msgsJson is List) totalMsgs += msgsJson.length;
+      } catch (_) {}
+    }
+
+    return CacheStats(
+      dmRoomCount: dmRooms,
+      groupRoomCount: grpRooms,
+      totalMessages: totalMsgs,
+      totalBytes: totalBytes,
+    );
+  }
+
+  static Map<String, CachedDMSnapshot> exportAllDMs() {
+    final box = _safeBox;
+    if (box == null) return {};
+
+    final result = <String, CachedDMSnapshot>{};
+    for (final key in box.keys.cast<String>()) {
+      if (!key.startsWith('dm_')) continue;
+      final roomId = key.substring(3);
+      final snapshot = loadDM(roomId);
+      if (snapshot != null) {
+        result[roomId] = snapshot;
+      }
+    }
+    return result;
+  }
+
+  static Map<String, CachedGroupSnapshot> exportAllGroups() {
+    final box = _safeBox;
+    if (box == null) return {};
+
+    final result = <String, CachedGroupSnapshot>{};
+    for (final key in box.keys.cast<String>()) {
+      if (!key.startsWith('group_')) continue;
+      final roomId = key.substring(6);
+      final snapshot = loadGroup(roomId);
+      if (snapshot != null) {
+        result[roomId] = snapshot;
+      }
+    }
+    return result;
+  }
+
+  // ───────────────────────────────────────────────
+  // ⭐ NEW: stale 방 캐시 정리
+  //
+  // - validDmRoomIds: DM 방 유효 집합. null이면 DM은 건드리지 않음
+  // - validGroupRoomIds: 그룹 방 유효 집합. null이면 그룹은 건드리지 않음
+  //
+  // "나가기"한 방은 서버에 hidden_by 들어가 있지만 여전히 멤버이므로 유지됨
+  // (호출자가 hidden 방도 validIds에 포함해서 전달해야 함)
+  // ───────────────────────────────────────────────
+  static Future<int> cleanupStaleRooms({
+    Set<String>? validDmRoomIds,
+    Set<String>? validGroupRoomIds,
+  }) async {
+    final box = _safeBox;
+    if (box == null) return 0;
+
+    int removed = 0;
+
+    if (validDmRoomIds != null) {
+      final dmKeys = box.keys
+          .cast<String>()
+          .where((k) => k.startsWith('dm_'))
+          .toList();
+
+      for (final key in dmKeys) {
+        final roomId = key.substring(3);
+        if (!validDmRoomIds.contains(roomId)) {
+          await box.delete(key);
+          _lru.remove(roomId);
+          removed++;
+          print('🧹 [Cache] stale DM 캐시 제거: $roomId');
+        }
+      }
+    }
+
+    if (validGroupRoomIds != null) {
+      final grpKeys = box.keys
+          .cast<String>()
+          .where((k) => k.startsWith('group_'))
+          .toList();
+
+      for (final key in grpKeys) {
+        final roomId = key.substring(6);
+        if (!validGroupRoomIds.contains(roomId)) {
+          await box.delete(key);
+          _lru.remove(roomId);
+          removed++;
+          print('🧹 [Cache] stale Group 캐시 제거: $roomId');
+        }
+      }
+    }
+
+    if (removed > 0) {
+      print('✅ [Cache] stale 캐시 정리 완료: $removed개');
+    }
+
+    return removed;
+  }
 
   // ───────────────────────────────────────────────
   // DM 캐시
@@ -94,7 +255,6 @@ class MessageCacheService {
       );
     } catch (e) {
       print('🔴 [MessageCache] DM 로드 실패: $e');
-      // 망가진 데이터 제거
       box.delete(_dmKey(roomId));
       return null;
     }
@@ -222,22 +382,19 @@ class MessageCacheService {
     }
   }
 
-  // ───────────────────────────────────────────────
-  // 전체 삭제 (로그아웃 등)
-  // ───────────────────────────────────────────────
   static Future<void> clearAll() async {
     _lru.clear();
     await _safeBox?.clear();
   }
 
   // ───────────────────────────────────────────────
-  // 직렬화 헬퍼 (모델 파일 안 건드림)
+  // 직렬화 헬퍼
   // ───────────────────────────────────────────────
   static Map<String, dynamic> _messageToMap(MessageModel m) {
     return {
       'id': m.id,
       'sender_id': m.senderId,
-      'room_id': m.receiverId, // MessageModel.receiverId는 사실 room_id
+      'room_id': m.receiverId,
       'content': m.content,
       'is_read': m.isRead,
       'is_deleted': m.isDeleted,
@@ -301,7 +458,7 @@ class MessageCacheService {
 }
 
 // ═══════════════════════════════════════════════════
-// 스냅샷 모델 (provider에서 import해서 사용)
+// 스냅샷 / 통계 모델
 // ═══════════════════════════════════════════════════
 class CachedDMSnapshot {
   final List<MessageModel> messages;
@@ -329,4 +486,31 @@ class CachedGroupSnapshot {
     required this.hasMore,
     required this.savedAt,
   });
+}
+
+class CacheStats {
+  final int dmRoomCount;
+  final int groupRoomCount;
+  final int totalMessages;
+  final int totalBytes;
+
+  CacheStats({
+    required this.dmRoomCount,
+    required this.groupRoomCount,
+    required this.totalMessages,
+    required this.totalBytes,
+  });
+
+  int get totalRooms => dmRoomCount + groupRoomCount;
+
+  String get formattedSize {
+    if (totalBytes < 1024) return '${totalBytes}B';
+    if (totalBytes < 1024 * 1024) {
+      return '${(totalBytes / 1024).toStringAsFixed(1)}KB';
+    }
+    if (totalBytes < 1024 * 1024 * 1024) {
+      return '${(totalBytes / (1024 * 1024)).toStringAsFixed(1)}MB';
+    }
+    return '${(totalBytes / (1024 * 1024 * 1024)).toStringAsFixed(2)}GB';
+  }
 }

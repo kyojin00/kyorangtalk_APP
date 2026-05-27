@@ -18,6 +18,9 @@ const int kPrefetchGroupTopN = 7;
 const Duration kPrefetchGroupFreshness = Duration(minutes: 1);
 final Set<String> _prefetchGroupInFlight = {};
 
+// ⭐ NEW: stale 그룹 캐시 정리 — 세션당 1회만
+bool _didCleanupStaleGroup = false;
+
 // ═══════════════════════════════════════════════
 // 프로필 캐시 (메모리, 방 단위)
 // ═══════════════════════════════════════════════
@@ -149,6 +152,24 @@ final groupRoomsProvider = StreamProvider<List<GroupRoomModel>>((ref) {
           .from('kyorangtalk_group_members')
           .select('room_id, role, joined_at')
           .eq('user_id', user.id);
+
+      // ⭐ NEW: 세션당 1회 stale 그룹 캐시 정리
+      //   내가 멤버인 방만 유효 집합으로 사용
+      //   (멤버 0개여도 청소는 진행 — 빈 set 넘기면 모든 그룹 캐시 삭제됨)
+      if (!_didCleanupStaleGroup) {
+        _didCleanupStaleGroup = true;
+        try {
+          final validGroupIds = <String>{
+            for (final m in (members as List)) m['room_id'] as String,
+          };
+          await MessageCacheService.cleanupStaleRooms(
+            validDmRoomIds: <String>{}, // DM은 chat_provider에서 처리, 여기선 빈 set이지만…
+            validGroupRoomIds: validGroupIds,
+          );
+        } catch (e) {
+          print('🟡 [Cache] stale group 정리 실패: $e');
+        }
+      }
 
       if (members.isEmpty) return [];
 

@@ -34,6 +34,7 @@ import '../widgets/chat_input_bar.dart';
 import '../widgets/chat_pinned_reply.dart';
 import '../widgets/reaction_picker_bar.dart';
 import '../widgets/failed_message_bubble.dart';
+import '../widgets/deleted_message_dialog.dart'; // ⭐ NEW
 import '../../polls/widgets/create_poll_sheet.dart';
 import '../../location/widgets/location_share_start_sheet.dart';
 import '../../schedule/widgets/schedule_create_sheet.dart';
@@ -927,7 +928,11 @@ Future<void> _shareSchedule() async {
   Future<void> _deleteMessage(String messageId) async {
     await Supabase.instance.client
         .from('kyorangtalk_messages')
-        .update({'is_deleted': true, 'content': '삭제된 메시지예요'})
+        .update({
+          'is_deleted': true,
+          'deleted_at': DateTime.now().toUtc().toIso8601String(),
+          // ⭐ content는 덮어쓰지 않음 — 수신자가 24시간 내 복원 가능
+        })
         .eq('id', messageId)
         .eq('sender_id', _myId);
   }
@@ -1081,6 +1086,27 @@ Future<void> _shareSchedule() async {
                 onTap: () {
                   Navigator.pop(sheetCtx);
                   _reportMessage(msg);
+                },
+              ),
+
+            // ⭐ NEW: 삭제된 메시지 — 수신자만 원본 보기 가능
+            if (!isMe && msg.isDeleted)
+              ListTile(
+                leading: Icon(Icons.lock_open_rounded,
+                    color: AppTheme.primary),
+                title: Text('원본 보기',
+                    style: TextStyle(
+                        color: AppTheme.primary,
+                        fontWeight: FontWeight.w600)),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  showRestoreDeletedDmDialog(
+                    context: context,
+                    messageId: msg.id,
+                    senderId: msg.senderId,
+                    roomId: widget.room.roomId,
+                    senderNickname: widget.room.partnerName,
+                  );
                 },
               ),
 

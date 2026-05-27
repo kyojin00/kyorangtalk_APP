@@ -13,13 +13,20 @@ const int kInitialMessageLimit = 50;
 const int kMoreMessageLimit = 50;
 
 // ⭐ Prefetch 설정
-const int kPrefetchTopN = 7;                              // 상위 7개 방 미리 로드
-const Duration kPrefetchFreshness = Duration(minutes: 1); // 1분 이내 캐시는 skip
+const int kPrefetchTopN = 7;
+const Duration kPrefetchFreshness = Duration(minutes: 1);
 
-// 방별 hidden_at 캐시 (메시지 조회 시 필터링용)
+// ⭐ 메시지 보관 정책 (DM)
+//   - 0-7일: 동기화 제공
+//   - 7-30일: 서버엔 있지만 새 fetch 시 제외
+//   - 30일 후: 서버에서 영구 삭제 (cron job)
+const Duration kMessageRetention = Duration(days: 7);
+
+DateTime _retentionCutoff() =>
+    DateTime.now().toUtc().subtract(kMessageRetention);
+
+// 방별 hidden_at 캐시
 final Map<String, DateTime?> _roomHiddenAtCache = {};
-
-// ⭐ Prefetch 중복 방지
 final Set<String> _prefetchInFlight = {};
 
 class _RoomMessageController {
@@ -66,8 +73,16 @@ Future<DateTime?> _getHiddenAt(String roomId) async {
   }
 }
 
+// ⭐ hidden_at과 retention cutoff 중 더 늦은 시점 반환
+//   둘 다 적용해서 가장 제한적인 쪽을 따름
+DateTime _effectiveCutoff(DateTime? hiddenAt) {
+  final retention = _retentionCutoff();
+  if (hiddenAt == null) return retention;
+  return hiddenAt.isAfter(retention) ? hiddenAt : retention;
+}
+
 // ═══════════════════════════════════════════════
-// ⭐ Prefetch (앱 시작 시 백그라운드 사전 로드)
+// Prefetch (앱 시작 시 백그라운드 사전 로드)
 // ═══════════════════════════════════════════════
 void prefetchTopDMRooms(List<ChatRoomModel> rooms) {
   for (final room in rooms.take(kPrefetchTopN)) {
@@ -77,9 +92,8 @@ void prefetchTopDMRooms(List<ChatRoomModel> rooms) {
 
 Future<void> _prefetchDMMessages(String roomId) async {
   if (_prefetchInFlight.contains(roomId)) return;
-  if (_activeControllers.containsKey(roomId)) return; // 이미 화면 열림
+  if (_activeControllers.containsKey(roomId)) return;
 
-  // 신선한 캐시 있으면 skip
   final existing = MessageCacheService.loadDM(roomId);
   if (existing != null &&
       DateTime.now().difference(existing.savedAt) < kPrefetchFreshness) {
@@ -89,17 +103,14 @@ Future<void> _prefetchDMMessages(String roomId) async {
   _prefetchInFlight.add(roomId);
   try {
     final hiddenAt = await _getHiddenAt(roomId);
+    // ⭐ retention 7일 컷 적용
+    final cutoff = _effectiveCutoff(hiddenAt);
 
-    var query = _supabase
+    final data = await _supabase
         .from('kyorangtalk_messages')
         .select('*')
-        .eq('room_id', roomId);
-
-    if (hiddenAt != null) {
-      query = query.gte('created_at', hiddenAt.toIso8601String());
-    }
-
-    final data = await query
+        .eq('room_id', roomId)
+        .gte('created_at', cutoff.toIso8601String())
         .order('created_at', ascending: false)
         .limit(kInitialMessageLimit);
 
@@ -111,7 +122,7 @@ Future<void> _prefetchDMMessages(String roomId) async {
       hiddenAt: hiddenAt,
       hasMore: messages.length >= kInitialMessageLimit,
     );
-    print('✅ [prefetchDM] $roomId (${messages.length}개)');
+    print('✅ [prefetchDM] $roomId (${messages.length}개, 7일 컷)');
   } catch (e) {
     print('🔴 [prefetchDM] 실패 ($roomId): $e');
   } finally {
@@ -120,22 +131,18 @@ Future<void> _prefetchDMMessages(String roomId) async {
 }
 
 // ═══════════════════════════════════════════════
-// ⭐ 실시간 캐시 갱신
-// 사용자가 그 방을 안 보고 있어도 새 메시지가 오면 캐시에 추가
-// → 그 방에 들어갈 때 항상 최신 상태 (로딩 X)
+// 실시간 캐시 갱신
 // ═══════════════════════════════════════════════
 Future<void> _appendToDMCache(
     String roomId, Map<String, dynamic> newRow) async {
-  // 이미 화면 열려 있으면 provider가 처리하므로 skip
   if (_activeControllers.containsKey(roomId)) return;
 
   final existing = MessageCacheService.loadDM(roomId);
-  if (existing == null) return; // 캐시가 없으면 (prefetch 안 된 방) skip
+  if (existing == null) return;
 
   try {
     final msg = MessageModel.fromJson(newRow);
 
-    // hidden_at 이전 메시지는 skip
     if (existing.hiddenAt != null &&
         msg.createdAt.isBefore(existing.hiddenAt!)) {
       return;
@@ -162,7 +169,7 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
   final user = _supabase.auth.currentUser!;
   final controller = StreamController<List<ChatRoomModel>>();
 
-  bool didPrefetch = false; // ⭐ NEW: 첫 fetch 후에만 prefetch
+  bool didPrefetch = false;
 
   Future<List<ChatRoomModel>> fetchRooms() async {
     final rooms = await _supabase
@@ -305,7 +312,6 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
   fetchRooms().then((data) {
     if (!controller.isClosed) controller.add(data);
 
-    // ⭐ NEW: 첫 fetch 후 상위 N개 방 백그라운드 사전 로드
     if (!didPrefetch && data.isNotEmpty) {
       didPrefetch = true;
       prefetchTopDMRooms(data);
@@ -342,7 +348,6 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
           final senderId = row['sender_id'] as String?;
           if (senderId == user.id) return;
 
-          // ⭐ NEW: 화면 안 열려 있는 방의 캐시에 새 메시지 자동 추가
           final roomId = row['room_id'] as String?;
           if (roomId != null) {
             _appendToDMCache(roomId, row);
@@ -399,7 +404,9 @@ final messagesProvider =
   final ctrl = _RoomMessageController(roomId, streamController);
   _activeControllers[roomId] = ctrl;
 
-  // ⭐ ① 디스크 캐시(Hive)에 스냅샷이 있으면 즉시 복원 → 로딩 스킵
+  // ① 디스크 캐시(Hive)에 스냅샷이 있으면 즉시 복원
+  //   ⭐ 로컬 캐시는 retention 컷 적용 안 함 — "난 이미 보여줘" 정책
+  //   사용자가 이미 받은 메시지는 7일 넘어도 계속 보임
   final snapshot = MessageCacheService.loadDM(roomId);
   final hasCachedData = snapshot != null;
   if (hasCachedData) {
@@ -412,21 +419,18 @@ final messagesProvider =
         '${DateTime.now().difference(snapshot.savedAt).inSeconds}s 전)');
   }
 
-  // ⭐ ② 백그라운드로 fresh 데이터 fetch + 머지
+  // ② 백그라운드로 fresh 데이터 fetch + 머지
+  //   ⭐ 서버 fetch는 7일 컷 적용
   () async {
     final hiddenAt = await _getHiddenAt(roomId);
     ctrl.hiddenAt = hiddenAt;
+    final cutoff = _effectiveCutoff(hiddenAt);
 
-    var query = _supabase
+    final data = await _supabase
         .from('kyorangtalk_messages')
         .select('*')
-        .eq('room_id', roomId);
-
-    if (hiddenAt != null) {
-      query = query.gte('created_at', hiddenAt.toIso8601String());
-    }
-
-    final data = await query
+        .eq('room_id', roomId)
+        .gte('created_at', cutoff.toIso8601String())
         .order('created_at', ascending: false)
         .limit(kInitialMessageLimit);
 
@@ -435,6 +439,7 @@ final messagesProvider =
     if (streamController.isClosed) return;
 
     if (hasCachedData) {
+      // 로컬에 있는 메시지는 hidden_at으로만 필터링 (retention 컷은 로컬에 적용 안 함)
       final filtered = hiddenAt != null
           ? ctrl.messages
               .where((m) => !m.createdAt.isBefore(hiddenAt))
@@ -556,6 +561,8 @@ final messagesProvider =
 // ═══════════════════════════════════════════════
 // 더 오래된 메시지 가져오기
 // ═══════════════════════════════════════════════
+// ⭐ retention cutoff 적용: 페이지네이션도 7일 이전엔 안 감
+//   "더 보기"를 눌러도 서버에선 7일 이내 메시지만 줌
 Future<bool> loadOlderMessages(String roomId) async {
   final ctrl = _activeControllers[roomId];
   if (ctrl == null) return false;
@@ -566,18 +573,21 @@ Future<bool> loadOlderMessages(String roomId) async {
   ctrl.isLoadingMore = true;
   try {
     final oldestTime = ctrl.messages.first.createdAt;
+    final cutoff = _effectiveCutoff(ctrl.hiddenAt);
 
-    var query = _supabase
+    // ⭐ 가장 오래된 메시지가 이미 cutoff 이전이면 더 가져올 게 없음
+    if (oldestTime.isBefore(cutoff) ||
+        oldestTime.isAtSameMomentAs(cutoff)) {
+      ctrl.hasMore = false;
+      return false;
+    }
+
+    final data = await _supabase
         .from('kyorangtalk_messages')
         .select('*')
         .eq('room_id', roomId)
-        .lt('created_at', oldestTime.toIso8601String());
-
-    if (ctrl.hiddenAt != null) {
-      query = query.gte('created_at', ctrl.hiddenAt!.toIso8601String());
-    }
-
-    final data = await query
+        .lt('created_at', oldestTime.toIso8601String())
+        .gte('created_at', cutoff.toIso8601String())
         .order('created_at', ascending: false)
         .limit(kMoreMessageLimit);
 
