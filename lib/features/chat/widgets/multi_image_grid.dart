@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
@@ -18,7 +19,19 @@ import '../screens/multi_image_viewer_screen.dart';
 //   - 같은 URL은 디스크 + 메모리 캐시
 //   - 스크롤 시 재요청 없음
 //   - 첫 로드 후 인스턴트
+//
+// ⭐ file:// 지원: 백업 복원된 로컬 이미지도 표시
+//   - https://*  → CachedNetworkImage
+//   - file://* 또는 절대 경로 → Image.file
 // ═══════════════════════════════════════════════════
+
+// ─── 로컬 URL 판별 (file:// 또는 절대 경로)
+bool _isLocalUrl(String url) =>
+    url.startsWith('file://') ||
+    (url.startsWith('/') && !url.startsWith('//'));
+
+String _localPath(String url) =>
+    url.startsWith('file://') ? url.replaceFirst('file://', '') : url;
 
 class MultiImageGrid extends StatelessWidget {
   final List<String> imageUrls;
@@ -243,14 +256,36 @@ class MultiImageGrid extends StatelessWidget {
 
 // ═══════════════════════════════════════════════════
 // 개별 이미지 타일 (로딩/에러 상태 포함)
-// ⭐ CachedNetworkImage로 자동 캐싱
+// ⭐ 로컬(file://): Image.file
+// ⭐ 원격(https://): CachedNetworkImage 로 자동 캐싱
 // ═══════════════════════════════════════════════════
 class _ImageTile extends StatelessWidget {
   final String url;
   const _ImageTile({required this.url});
 
+  Widget _errorWidget() => Container(
+        color: AppTheme.border,
+        alignment: Alignment.center,
+        child: Icon(
+          Icons.broken_image_outlined,
+          color: AppTheme.textSub,
+          size: 24,
+        ),
+      );
+
   @override
   Widget build(BuildContext context) {
+    // ⭐ 로컬 파일 (백업 복원된 이미지)
+    if (_isLocalUrl(url)) {
+      return Image.file(
+        File(_localPath(url)),
+        fit: BoxFit.cover,
+        cacheWidth: 480,
+        errorBuilder: (_, __, ___) => _errorWidget(),
+      );
+    }
+
+    // 원격 URL
     return CachedNetworkImage(
       imageUrl: url,
       fit: BoxFit.cover,
@@ -271,15 +306,7 @@ class _ImageTile extends StatelessWidget {
           ),
         ),
       ),
-      errorWidget: (_, __, ___) => Container(
-        color: AppTheme.border,
-        alignment: Alignment.center,
-        child: Icon(
-          Icons.broken_image_outlined,
-          color: AppTheme.textSub,
-          size: 24,
-        ),
-      ),
+      errorWidget: (_, __, ___) => _errorWidget(),
     );
   }
 }

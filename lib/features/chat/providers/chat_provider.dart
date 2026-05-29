@@ -22,6 +22,14 @@ const Duration kPrefetchFreshness = Duration(minutes: 1);
 //   - 30일 후: 서버에서 영구 삭제 (cron job)
 const Duration kMessageRetention = Duration(days: 7);
 
+// ⭐ 채팅방 목록 표시 정책 (재설치 케이스만 정리)
+//   - 로컬 캐시에 메시지가 있는 방 = 항상 표시 (사용자가 이미 본 방)
+//   - 로컬 캐시 없는 방 = 7일 이내 활동이 있을 때만 표시
+//   → 한 기기에서 계속 쓰면 자동 숨김 없음
+//   → 재설치 후엔 빈 깡통 방 안 보임
+//   → 복원하면 캐시 채워져서 자동으로 다 보임
+const Duration kRoomListRetention = Duration(days: 7);
+
 DateTime _retentionCutoff() =>
     DateTime.now().toUtc().subtract(kMessageRetention);
 
@@ -289,12 +297,29 @@ final chatRoomsProvider = StreamProvider<List<ChatRoomModel>>((ref) {
       );
     }).toList();
 
-    list.sort((a, b) {
+    // ⭐ 로컬 캐시 기반 필터링
+    //   기준: 로컬에 메시지가 있으면 = 이미 이 기기에서 본 방 → 표시
+    //         로컬에 없으면 = 재설치 또는 못 본 방 → 7일 컷 적용
+    //   예외: 고정된 방, 안 읽은 메시지 있는 방은 항상 표시
+    final cutoff = DateTime.now().subtract(kRoomListRetention);
+    final visible = list.where((r) {
+      if (r.isPinned) return true;
+      if (r.unreadCount > 0) return true;
+
+      // 로컬 캐시에 이 방 메시지가 있으면 항상 표시
+      final cached = MessageCacheService.loadDM(r.roomId);
+      if (cached != null && cached.messages.isNotEmpty) return true;
+
+      // 캐시 없는 방은 7일 컷 적용 (재설치 케이스 정리)
+      return r.lastTime.isAfter(cutoff);
+    }).toList();
+
+    visible.sort((a, b) {
       if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
       return b.lastTime.compareTo(a.lastTime);
     });
 
-    return list;
+    return visible;
   }
 
   Timer? refetchTimer;

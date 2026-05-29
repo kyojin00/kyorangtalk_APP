@@ -79,9 +79,22 @@
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
 
+        <!-- ⭐⭐⭐ Impeller 비활성화 (BackdropFilter 회색 화면 버그 우회) -->
+        <!-- Flutter Impeller(Vulkan) 백엔드에서 일부 Samsung/MediaTek 기기 -->
+        <!-- BackdropFilter+blur 렌더링이 실패해 회색 화면이 표시되는 문제를 회피. -->
+        <!-- 추후 Flutter가 이슈를 수정하면 이 줄 제거 가능. -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
+
+        <!-- Firebase Messaging 기본 채널 -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="kyorangtalk_messages"/>
+
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-7432728380552317~7233417942"/>    
 
         <activity
             android:name=".MainActivity"

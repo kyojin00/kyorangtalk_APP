@@ -1,10 +1,15 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_theme.dart';
 import '../screens/photo_viewer_screen.dart';
 
 // ═══════════════════════════════════════════════════
 // 🖼 ProfileGallerySection — 갤러리 그리드
-// (PhotoViewerScreen은 별도 파일에서 import만 함)
+// ⭐ Release OOM 수정:
+//   1. Image.network → CachedNetworkImage 교체
+//   2. memCacheWidth/Height 적용 (메모리 폭발 방지)
+//   3. filterQuality.high 제거 (Impeller 호환성)
+//   4. 빌드 시점 의존성 줄임 (loadingBuilder 단순화)
 // ═══════════════════════════════════════════════════
 
 class ProfileGallerySection extends StatelessWidget {
@@ -136,6 +141,7 @@ class ProfileGallerySection extends StatelessWidget {
                 final visibility =
                     photo['visibility'] as String? ?? 'friends';
                 return _PhotoTile(
+                  key: ValueKey(photo['id'] ?? url),
                   url: url,
                   visibility: visibility,
                   showVisibilityBadge: isOwner,
@@ -149,6 +155,9 @@ class ProfileGallerySection extends StatelessWidget {
   }
 }
 
+// ═══════════════════════════════════════════════════
+// ⭐ _PhotoTile — 메모리 캐시 제한 적용
+// ═══════════════════════════════════════════════════
 class _PhotoTile extends StatelessWidget {
   final String url;
   final String visibility;
@@ -156,6 +165,7 @@ class _PhotoTile extends StatelessWidget {
   final VoidCallback onTap;
 
   const _PhotoTile({
+    super.key,
     required this.url,
     required this.visibility,
     required this.showVisibilityBadge,
@@ -164,6 +174,13 @@ class _PhotoTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // ⭐ 디스플레이 픽셀 밀도 고려한 메모리 캐시 사이즈 계산
+    // 화면 너비의 1/3에 해당하는 타일 사이즈 × 픽셀 밀도
+    final screenWidth = MediaQuery.of(context).size.width;
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final tileSize =
+        ((screenWidth - 32 - 12) / 3 * dpr).round(); // 패딩 16*2 + spacing 6*2
+
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -182,29 +199,32 @@ class _PhotoTile extends StatelessWidget {
           children: [
             ClipRRect(
               borderRadius: BorderRadius.circular(12),
-              child: Image.network(
-                url,
+              // ⭐ CachedNetworkImage 사용 — 자동 디스크 캐시 + 메모리 제한
+              child: CachedNetworkImage(
+                imageUrl: url,
                 width: double.infinity,
                 height: double.infinity,
                 fit: BoxFit.cover,
-                filterQuality: FilterQuality.high,
-                loadingBuilder: (_, child, progress) {
-                  if (progress == null) return child;
-                  return Container(
-                    color: AppTheme.bgCard,
-                    child: const Center(
-                      child: SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: AppTheme.primary,
-                        ),
+                // ⭐ 핵심: 메모리 캐시 사이즈 제한 (원본 그대로 로드 방지)
+                memCacheWidth: tileSize,
+                memCacheHeight: tileSize,
+                // ⭐ 페이드인 부드럽게 (재빌드 횟수 줄임)
+                fadeInDuration: const Duration(milliseconds: 150),
+                fadeOutDuration: const Duration(milliseconds: 80),
+                placeholder: (_, __) => Container(
+                  color: AppTheme.bgCard,
+                  child: const Center(
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: AppTheme.primary,
                       ),
                     ),
-                  );
-                },
-                errorBuilder: (_, __, ___) => Container(
+                  ),
+                ),
+                errorWidget: (_, __, ___) => Container(
                   color: AppTheme.border,
                   child: Icon(
                     Icons.broken_image_rounded,

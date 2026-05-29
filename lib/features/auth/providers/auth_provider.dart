@@ -57,10 +57,9 @@ class AuthService {
 
   // Google 로그인
   Future<void> signInWithGoogle() async {
+    // ⭐ serverClientId 제거 — google-services.json에서 자동 감지
     final googleSignIn = GoogleSignIn(
-      serverClientId:'54388432481-v8n3a8ijv4m5as0kltofu1jn00puu1tc.apps.googleusercontent.com',
       scopes: ['email', 'profile'],
-      forceCodeForRefreshToken: true,
     );
 
     await googleSignIn.signOut();

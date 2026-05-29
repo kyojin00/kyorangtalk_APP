@@ -1,7 +1,7 @@
 name: kyorang_talk
 description: 교랑톡 - 교랑 채팅 앱
 publish_to: 'none'
-version: 1.0.0+7
+version: 1.0.0+12
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -61,6 +61,7 @@ dependencies:
   hive: ^2.2.3
   hive_flutter: ^1.1.0
   archive: ^3.6.1
+  google_mobile_ads: ^5.2.0
 
   
 

@@ -9,9 +9,24 @@ class AvatarWidget extends StatelessWidget {
 
   const AvatarWidget({super.key, this.url, this.name, this.size = 46});
 
+  // ⭐ 안전한 이니셜 추출
+  // - null / 빈 문자열 / 공백만 있는 경우 '?' 반환
+  // - 이모지나 한글 첫 글자도 안전하게 추출 (characters 사용)
+  String _safeInitial() {
+    final n = name?.trim() ?? '';
+    if (n.isEmpty) return '?';
+    try {
+      // characters로 grapheme cluster 단위 추출 (이모지 안전)
+      final first = n.characters.first;
+      return first.toUpperCase();
+    } catch (_) {
+      return '?';
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final initial = (name ?? '?').substring(0, 1).toUpperCase();
+    final initial = _safeInitial();
 
     if (url != null && url!.isNotEmpty) {
       // ⭐ 디스플레이 픽셀 밀도 고려한 메모리 캐시 사이즈

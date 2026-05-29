@@ -1,16 +1,25 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:purchases_flutter/purchases_flutter.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../subscription/screens/subscription_screen.dart';
+import '../models/chat_room_model.dart';
 import '../providers/chat_provider.dart' as chat_provider;
 import '../services/message_backup_service.dart';
 import '../services/message_cache_service.dart';
 import '../services/subscription_service.dart';
-import 'pro_upgrade_screen.dart';
 
 // ═══════════════════════════════════════════════════
 // ☁️ BackupScreen (= 메시지 서랍)
 //
 // 위치: lib/features/chat/screens/backup_screen.dart
+//
+// ⭐ 변경점 (v4)
+// 1. 메시지 양 숨김 — 대화방 + 용량 두 칸만 표시
+// 2. 용량은 메시지당 평균 추정치 (~ 표시)
+//    정확한 값은 MessageCacheService 에 DM-only stats 함수 추가 시 가능
+// 3. 미디어 백업 (사진/동영상/파일) 은 별도 작업
+//    → MessageBackupService 코드 받은 후 진행
 // ═══════════════════════════════════════════════════
 class BackupScreen extends ConsumerStatefulWidget {
   const BackupScreen({super.key});
@@ -23,24 +32,87 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
   bool _loading = true;
   bool _busy = false;
   List<BackupInfo> _backups = [];
-  CacheStats? _stats;
+
+  // ⭐ DM 전용 통계
+  int _dmRoomCount = 0;
+  int _dmMessageCount = 0; // _createBackup 가드용 (UI 노출 X)
+  int _dmEstimatedBytes = 0;
+
+  // 메시지당 평균 크기 추정 (메타데이터 + content 평균)
+  static const int _bytesPerMessageEstimate = 300;
+
+  bool _listenerRegistered = false;
 
   @override
   void initState() {
     super.initState();
     _load();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+
+      Purchases.addCustomerInfoUpdateListener(_onCustomerInfoUpdate);
+      _listenerRegistered = true;
+
+      final rooms =
+          ref.read(chat_provider.chatRoomsProvider).value;
+      if (rooms != null) _recomputeDmStats(rooms);
+    });
+  }
+
+  @override
+  void dispose() {
+    if (_listenerRegistered) {
+      Purchases.removeCustomerInfoUpdateListener(_onCustomerInfoUpdate);
+    }
+    super.dispose();
+  }
+
+  void _onCustomerInfoUpdate(CustomerInfo info) {
+    if (!mounted) return;
+    ref.invalidate(subscriptionStatusProvider);
+  }
+
+  // ⭐ chatRoomsProvider 데이터로부터 DM 전용 통계 재계산
+  void _recomputeDmStats(List<ChatRoomModel> rooms) {
+    int messages = 0;
+    int roomsWithCache = 0;
+    for (final r in rooms) {
+      final c = MessageCacheService.loadDM(r.roomId);
+      if (c != null && c.messages.isNotEmpty) {
+        roomsWithCache++;
+        messages += c.messages.length;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _dmRoomCount = roomsWithCache;
+      _dmMessageCount = messages;
+      _dmEstimatedBytes = messages * _bytesPerMessageEstimate;
+    });
   }
 
   Future<void> _load() async {
     setState(() => _loading = true);
-    final stats = MessageCacheService.getStats();
     final backups = await MessageBackupService.listBackups();
     if (!mounted) return;
     setState(() {
-      _stats = stats;
       _backups = backups;
       _loading = false;
     });
+
+    final rooms = ref.read(chat_provider.chatRoomsProvider).value;
+    if (rooms != null) _recomputeDmStats(rooms);
+  }
+
+  Future<void> _goToSubscription() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const SubscriptionScreen()),
+    );
+    if (!mounted) return;
+    ref.invalidate(subscriptionStatusProvider);
+    await _load();
   }
 
   // ───────────────────────────────────────────────
@@ -53,11 +125,11 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     if (!mounted) return;
 
     if (!status.isPro) {
-      _showProRequired();
+      await _goToSubscription();
       return;
     }
 
-    if ((_stats?.totalMessages ?? 0) == 0) {
+    if (_dmMessageCount == 0) {
       _snack('백업할 메시지가 없어요');
       return;
     }
@@ -282,11 +354,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
   }
 
   // ───────────────────────────────────────────────
-  // ⭐ 진행 다이얼로그 (UI 수정됨)
-  //   - Material로 감싸서 텍스트 스타일 상속 정상화 (밑줄 제거)
-  //   - 진행 바 굵게 (8px) + 더 잘 보이게
-  //   - % 텍스트 추가
-  //   - 다이얼로그 그림자/elevation 추가
+  // 진행 다이얼로그
   // ───────────────────────────────────────────────
   void _showProgressDialog(
       ValueNotifier<_ProgressState> ctrl, String title) {
@@ -312,7 +380,6 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // 아이콘 + 제목
                     Row(
                       children: [
                         SizedBox(
@@ -346,8 +413,6 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
                       ],
                     ),
                     const SizedBox(height: 16),
-
-                    // 진행 바 (굵게)
                     ClipRRect(
                       borderRadius: BorderRadius.circular(6),
                       child: LinearProgressIndicator(
@@ -359,10 +424,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
                         minHeight: 8,
                       ),
                     ),
-
                     const SizedBox(height: 12),
-
-                    // 상태 텍스트
                     Text(
                       s.status,
                       style: TextStyle(
@@ -378,59 +440,6 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  // ───────────────────────────────────────────────
-  // Pro 안내
-  // ───────────────────────────────────────────────
-  void _showProRequired() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppTheme.bgCard,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-        title: Text(
-          '교랑톡 Pro가 필요해요',
-          style: TextStyle(
-            color: AppTheme.textMain,
-            fontWeight: FontWeight.w700,
-            fontSize: 16,
-          ),
-        ),
-        content: Text(
-          '메시지 백업과 복원은 Pro 구독자만 사용할 수 있어요.\n기기를 옮기거나 앱을 재설치해도 추억을 지킬 수 있어요.',
-          style: TextStyle(
-            color: AppTheme.textSub,
-            fontSize: 13,
-            height: 1.6,
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child:
-                Text('나중에', style: TextStyle(color: AppTheme.textSub)),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const ProUpgradeScreen(),
-                ),
-              );
-            },
-            child: Text('Pro 보기',
-                style: TextStyle(
-                    color: AppTheme.primary,
-                    fontWeight: FontWeight.w700)),
-          ),
-        ],
       ),
     );
   }
@@ -461,6 +470,11 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // ⭐ chatRoomsProvider 변경 시 DM stats 자동 재계산
+    ref.listen(chat_provider.chatRoomsProvider, (_, next) {
+      next.whenData(_recomputeDmStats);
+    });
+
     final statusAsync = ref.watch(subscriptionStatusProvider);
     final isPro = statusAsync.maybeWhen(
       data: (s) => s.isPro,
@@ -557,9 +571,10 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           ),
           const SizedBox(height: 10),
           Text(
-            '메시지는 내 폰에만 영구 저장돼요. '
+            'DM 메시지는 내 폰에만 영구 저장돼요. '
             '기기를 옮기거나 앱을 다시 설치하면 사라져요. '
-            '백업해두면 어디서든 추억을 지킬 수 있어요.',
+            '백업해두면 어디서든 추억을 지킬 수 있어요. '
+            '(그룹 채팅은 서버에 보관되어 백업이 필요 없어요)',
             style: TextStyle(
               color: AppTheme.textSub,
               fontSize: 12.5,
@@ -571,8 +586,8 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     );
   }
 
+  // ⭐ 통계 카드: 대화방 + 용량 두 칸
   Widget _buildStatsCard() {
-    final stats = _stats;
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -584,7 +599,7 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '이 기기의 메시지',
+            '백업 대상',
             style: TextStyle(
               color: AppTheme.textSub,
               fontSize: 12,
@@ -594,11 +609,14 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
           const SizedBox(height: 12),
           Row(
             children: [
-              _statItem('메시지', '${stats?.totalMessages ?? 0}개'),
+              _statItem('대화방', '$_dmRoomCount개'),
               _statDivider(),
-              _statItem('대화방', '${stats?.totalRooms ?? 0}개'),
-              _statDivider(),
-              _statItem('용량', stats?.formattedSize ?? '0B'),
+              _statItem(
+                '용량',
+                _dmEstimatedBytes == 0
+                    ? '0B'
+                    : '~ ${_fmtBytes(_dmEstimatedBytes)}',
+              ),
             ],
           ),
         ],
@@ -644,7 +662,9 @@ class _BackupScreenState extends ConsumerState<BackupScreen> {
     return SizedBox(
       width: double.infinity,
       child: ElevatedButton.icon(
-        onPressed: _busy ? null : _createBackup,
+        onPressed: _busy
+            ? null
+            : (isPro ? _createBackup : _goToSubscription),
         icon: Icon(
           isPro ? Icons.cloud_upload_outlined : Icons.lock_outline,
           color: Colors.white,

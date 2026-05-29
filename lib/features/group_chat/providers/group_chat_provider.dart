@@ -21,6 +21,14 @@ final Set<String> _prefetchGroupInFlight = {};
 // ⭐ NEW: stale 그룹 캐시 정리 — 세션당 1회만
 bool _didCleanupStaleGroup = false;
 
+// ⭐ 채팅방 목록 표시 정책 (재설치 케이스만 정리)
+//   - 로컬 캐시에 메시지가 있는 방 = 항상 표시 (사용자가 이미 본 방)
+//   - 로컬 캐시 없는 방 = 7일 이내 활동이 있을 때만 표시
+//   → 한 기기에서 계속 쓰면 자동 숨김 없음
+//   → 재설치 후엔 빈 깡통 방 안 보임
+//   → 복원하면 캐시 채워져서 자동으로 다 보임
+const Duration kGroupRoomListRetention = Duration(days: 7);
+
 // ═══════════════════════════════════════════════
 // 프로필 캐시 (메모리, 방 단위)
 // ═══════════════════════════════════════════════
@@ -206,7 +214,7 @@ final groupRoomsProvider = StreamProvider<List<GroupRoomModel>>((ref) {
         unreadCounts[rid] = count;
       }
 
-      return rooms.map((r) {
+      final list = rooms.map((r) {
         final roomId = r['id'] as String;
         final joinedAt = joinedAtMap[roomId];
         final roomType = r['room_type'] as String? ?? 'group';
@@ -246,6 +254,29 @@ final groupRoomsProvider = StreamProvider<List<GroupRoomModel>>((ref) {
           tags:          tags,
           hasPassword:   r['password_hash'] != null,
         );
+      }).toList();
+
+      // ⭐ 로컬 캐시 기반 필터링
+      //   기준: 로컬에 메시지가 있으면 = 이미 이 기기에서 본 방 → 표시
+      //         로컬에 없으면 = 재설치 또는 못 본 방 → 7일 컷 적용
+      //   예외: 안 읽은 메시지 있는 방은 항상 표시
+      //   새 방 (메시지 없음): createdAt 기준 7일 유예
+      final cutoff = DateTime.now().subtract(kGroupRoomListRetention);
+      return list.where((r) {
+        if (r.unreadCount > 0) return true;
+
+        // 로컬 캐시에 이 방 메시지가 있으면 항상 표시
+        final cached = MessageCacheService.loadGroup(r.id);
+        if (cached != null && cached.messages.isNotEmpty) return true;
+
+        // 캐시 없는 방은 7일 컷 적용 (재설치 케이스 정리)
+        if (r.lastMessageAt != null) {
+          return r.lastMessageAt!.isAfter(cutoff);
+        }
+        // 메시지가 한 번도 없는 방: createdAt 기준
+        final created = DateTime.tryParse(r.createdAt);
+        if (created == null) return true; // 파싱 실패는 일단 표시
+        return created.isAfter(cutoff);
       }).toList();
     } catch (e, stack) {
       print('❌ fetchRooms 실패: $e');

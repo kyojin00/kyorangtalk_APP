@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/ads/ad_helper.dart';
 import '../../../core/notifications/notification_service.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../../../shared/widgets/skeleton_widget.dart';
@@ -13,6 +14,7 @@ import '../../group_chat/providers/group_chat_provider.dart';
 import '../../group_chat/screens/group_chat_room_screen.dart';
 import '../models/chat_room_model.dart';
 import '../providers/chat_provider.dart' as provider;
+import '../services/subscription_service.dart';
 
 // ═══════════════════════════════════════════════════
 // 💬 ChatListScreen
@@ -22,6 +24,10 @@ import '../providers/chat_provider.dart' as provider;
 //   - 메시지 UPDATE (is_read 등) → provider invalidate
 //   - 방 정보 변경 → provider invalidate
 //   - 디바운스로 과도한 invalidate 방지
+//
+// ⭐ 광고:
+//   - 무료 유저 + 검색 중 아님 + 방이 일정 개수 이상일 때
+//     채팅방 chatListAdInterval개마다 인라인 배너 1개 삽입
 // ═══════════════════════════════════════════════════
 
 class ChatListScreen extends ConsumerStatefulWidget {
@@ -424,6 +430,10 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
     final mutedAsync = ref.watch(mutedRoomsProvider);
     final mutedRooms = mutedAsync.value ?? {};
 
+    // ⭐ 광고 노출 조건용 — Pro 구독자면 광고 숨김
+    final subStatus = ref.watch(subscriptionStatusProvider);
+    final isPro = subStatus.value?.isPro ?? false;
+
     final totalUnread = roomsAsync.value
             ?.where((r) => !mutedRooms.contains(r.roomId))
             .fold(0, (s, r) => s + r.unreadCount) ??
@@ -606,6 +616,17 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                     );
                   }
 
+                  // ⭐ 광고 노출 조건 + 인덱스 계산
+                  //   - 무료 유저 + 검색 중 아님
+                  //   - 방 interval개마다 광고 1개 삽입
+                  //   - 한 묶음(block) = 방 interval개 + 광고 1개
+                  final interval = AdConfig.chatListAdInterval;
+                  final showAds = !isPro && _search.isEmpty;
+                  final adCount =
+                      showAds ? filtered.length ~/ interval : 0;
+                  final itemCount = filtered.length + adCount;
+                  final block = interval + 1;
+
                   return RefreshIndicator(
                     color: AppTheme.primary,
                     onRefresh: () async {
@@ -619,9 +640,17 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
                       physics: const AlwaysScrollableScrollPhysics(
                         parent: BouncingScrollPhysics(),
                       ),
-                      itemCount: filtered.length,
+                      itemCount: itemCount,
                       itemBuilder: (_, i) {
-                        final room = filtered[i];
+                        // ⭐ 광고 슬롯 위치
+                        if (showAds && (i + 1) % block == 0) {
+                          return const InlineBannerAd();
+                        }
+
+                        // ⭐ 광고 슬롯을 제외한 실제 방 인덱스
+                        final roomIndex =
+                            showAds ? i - (i ~/ block) : i;
+                        final room = filtered[roomIndex];
                         final isMuted =
                             mutedRooms.contains(room.roomId);
                         final isUnread =

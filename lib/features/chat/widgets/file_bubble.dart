@@ -9,9 +9,19 @@ import '../utils/file_helper.dart';
 // ═══════════════════════════════════════════════════
 // 📎 파일 메시지 버블
 // ═══════════════════════════════════════════════════
-// 
-// ⭐ 스크롤 안정화: AutomaticKeepAliveClientMixin 사용!
+//
+// ⭐ 스크롤 안정화: AutomaticKeepAliveClientMixin 사용
+// ⭐ file:// 지원: 백업 복원된 파일은 다운로드 없이 바로 열기
+//    - https://*    → 임시 디렉토리에 다운로드 후 열기
+//    - file://*     → 그대로 OpenFilex 로 열기
 // ═══════════════════════════════════════════════════
+
+bool _isLocalUrl(String url) =>
+    url.startsWith('file://') ||
+    (url.startsWith('/') && !url.startsWith('//'));
+
+String _localPath(String url) =>
+    url.startsWith('file://') ? url.replaceFirst('file://', '') : url;
 
 class FileBubble extends StatefulWidget {
   final String fileUrl;
@@ -38,13 +48,15 @@ class _FileBubbleState extends State<FileBubble>
   bool _downloading = false;
   double _progress = 0;
 
-  // ⭐ KeepAlive로 스크롤 시 위젯 유지!
+  // ⭐ KeepAlive로 스크롤 시 위젯 유지
   @override
   bool get wantKeepAlive => true;
 
+  bool get _isLocal => _isLocalUrl(widget.fileUrl);
+
   @override
   Widget build(BuildContext context) {
-    super.build(context);  // ⭐ 필수!
+    super.build(context); // ⭐ 필수
 
     final extension = widget.fileName.split('.').last.toLowerCase();
     final category = getFileCategory(extension);
@@ -169,7 +181,7 @@ class _FileBubbleState extends State<FileBubble>
 
                 const SizedBox(height: 12),
 
-                // 다운로드 버튼 / 진행률
+                // 다운로드 / 열기 버튼
                 _buildActionButton(),
               ],
             ),
@@ -240,6 +252,11 @@ class _FileBubbleState extends State<FileBubble>
       );
     }
 
+    // ⭐ 로컬 파일이면 "열기", 원격이면 "다운로드"
+    final actionLabel = _isLocal ? '열기' : '다운로드';
+    final actionIcon =
+        _isLocal ? Icons.open_in_new_rounded : Icons.download_outlined;
+
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 8),
       decoration: BoxDecoration(
@@ -252,13 +269,13 @@ class _FileBubbleState extends State<FileBubble>
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
-            Icons.download_outlined,
+            actionIcon,
             size: 14,
             color: widget.isMe ? Colors.white : AppTheme.primary,
           ),
           const SizedBox(width: 5),
           Text(
-            '다운로드',
+            actionLabel,
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w700,
@@ -365,7 +382,8 @@ class _FileBubbleState extends State<FileBubble>
                       fontWeight: FontWeight.w600),
                 ),
                 subtitle: Text(
-                  '다운로드 후 앱에서 열기',
+                  // ⭐ 로컬이면 안내 문구 변경
+                  _isLocal ? '앱에서 바로 열기' : '다운로드 후 앱에서 열기',
                   style: TextStyle(
                       fontSize: 12, color: AppTheme.textSub),
                 ),
@@ -380,10 +398,29 @@ class _FileBubbleState extends State<FileBubble>
   }
 
   // ═══════════════════════════════════════════════
-  // 📥 다운로드 + 열기
+  // 📥 다운로드 + 열기 (로컬 파일은 다운로드 없이 바로 열기)
   // ═══════════════════════════════════════════════
   Future<void> _downloadAndOpen() async {
     if (!mounted) return;
+
+    // ⭐ 로컬 파일 (file://)은 다운로드 없이 바로 열기
+    if (_isLocal) {
+      final localPath = _localPath(widget.fileUrl);
+      final file = File(localPath);
+      if (await file.exists()) {
+        await _openFile(localPath);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('원본 파일을 찾을 수 없어요'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+      return;
+    }
 
     setState(() {
       _downloading = true;

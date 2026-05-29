@@ -1,11 +1,14 @@
+// lib/features/friends/screens/friends_screen.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../core/ads/ad_helper.dart';
 import '../../../shared/widgets/avatar_widget.dart';
 import '../../chat/models/chat_room_model.dart';
 import '../../chat/providers/chat_provider.dart';
+import '../../chat/services/subscription_service.dart';
 import '../../profile/screens/user_profile_screen.dart';
 import '../../profile/screens/my_profile_screen.dart';
 import '../models/friend_model.dart';
@@ -27,6 +30,7 @@ export '../providers/friends_provider.dart';
 // 변경:
 // - AddFriendSheet, SuggestionsSection에 onMessage 콜백 연결
 // - DM 시작 로직을 _startChatWithUser로 일반화
+// - ⭐ 무료 유저 + 친구 수 일정 이상일 때 목록 하단 배너 광고
 // ═══════════════════════════════════════════════
 
 class FriendsScreen extends ConsumerStatefulWidget {
@@ -676,6 +680,10 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
     final suggestionsAsync = ref.watch(friendSuggestionsProvider);
     final pendingCount = pendingAsync.value?.length ?? 0;
 
+    // ⭐ 광고 노출 조건용 — Pro 구독자면 광고 숨김
+    final subStatus = ref.watch(subscriptionStatusProvider);
+    final isPro = subStatus.value?.isPro ?? false;
+
     final suggestions = (suggestionsAsync.value ?? [])
         .where((s) => !_dismissedSuggestions.contains(s.userId))
         .toList();
@@ -992,6 +1000,13 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                           .where((f) => !f.isFavorite)
                           .toList();
 
+                      // ⭐ 하단 배너 노출 조건:
+                      //   무료 유저 + 검색 중 아님 + 친구 수 기준 이상
+                      final showBottomAd = !isPro &&
+                          _search.isEmpty &&
+                          friends.length >=
+                              AdConfig.friendListMinCount;
+
                       return CustomScrollView(
                         physics: const BouncingScrollPhysics(),
                         slivers: [
@@ -1163,6 +1178,12 @@ class _FriendsScreenState extends ConsumerState<FriendsScreen>
                                 },
                                 childCount: others.length,
                               ),
+                            ),
+
+                          // ⭐ 친구 목록 하단 배너 광고
+                          if (showBottomAd)
+                            const SliverToBoxAdapter(
+                              child: InlineBannerAd(),
                             ),
 
                           const SliverToBoxAdapter(

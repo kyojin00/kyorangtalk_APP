@@ -40,6 +40,157 @@ StreamSubscription<String>? _voiceRoomTapSub;
 
 const String _sentryDsn = 'https://744b3e255fa47b21eb265d1fba18f0dc@o4511373790478336.ingest.us.sentry.io/4511373797359616';
 
+// ═══════════════════════════════════════════════════
+// ⭐ Release 빌드 에러 시각화
+// 회색 화면 대신 실제 에러 메시지를 표시해 디버깅 가능하게 함
+// Sentry에도 자동 보고
+// ═══════════════════════════════════════════════════
+void _setupErrorHandlers() {
+  // Flutter framework 에러 → 화면에 보이는 위젯 트리 안에서 발생한 에러
+  ErrorWidget.builder = (FlutterErrorDetails details) {
+    // 에러 자동 보고
+    Sentry.captureException(
+      details.exception,
+      stackTrace: details.stack,
+    );
+
+    return Material(
+      color: const Color(0xFF1A1A2E),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 20),
+              const Icon(Icons.error_outline_rounded,
+                  color: Color(0xFFFCA5A5), size: 48),
+              const SizedBox(height: 16),
+              const Text(
+                '화면을 표시하는 중 오류가 발생했어요',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '아래 내용을 캡쳐해서 개발자에게 알려주세요',
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.5),
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.4),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: Colors.white.withOpacity(0.1),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Exception:',
+                          style: TextStyle(
+                            color: const Color(0xFFFCA5A5),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        SelectableText(
+                          details.exception.toString(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontFamily: 'monospace',
+                            height: 1.5,
+                          ),
+                        ),
+                        if (details.stack != null) ...[
+                          const SizedBox(height: 16),
+                          Text(
+                            'Stack trace:',
+                            style: TextStyle(
+                              color: const Color(0xFFFCA5A5),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          SelectableText(
+                            details.stack.toString(),
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(0.7),
+                              fontSize: 10,
+                              fontFamily: 'monospace',
+                              height: 1.4,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    // 이전 화면으로 돌아가기
+                    final context = navigatorKey.currentContext;
+                    if (context != null && Navigator.canPop(context)) {
+                      Navigator.pop(context);
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF7C3AED),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Text(
+                    '이전 화면으로',
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  };
+
+  // Flutter framework 에러 추가 핸들링 (콘솔 출력 + Sentry)
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    Sentry.captureException(
+      details.exception,
+      stackTrace: details.stack,
+    );
+  };
+
+  // 비동기 처리되지 않은 에러 (Dart 레벨)
+  PlatformDispatcher.instance.onError = (error, stack) {
+    Sentry.captureException(error, stackTrace: stack);
+    debugPrint('🔴 [PlatformDispatcher] $error');
+    return true;
+  };
+}
+
 void main() async {
   if (_sentryDsn.isEmpty) {
     await _runWithoutSentry();
@@ -68,6 +219,8 @@ void main() async {
       },
       appRunner: () async {
         await _initializeApp();
+        // ⭐ ErrorWidget 설정 (Sentry 초기화 후)
+        _setupErrorHandlers();
         runApp(
           DefaultAssetBundle(
             bundle: SentryAssetBundle(),
@@ -83,6 +236,7 @@ void main() async {
 Future<void> _runWithoutSentry() async {
   WidgetsFlutterBinding.ensureInitialized();
   await _initializeApp();
+  _setupErrorHandlers();
   runApp(const ProviderScope(child: KyorangTalkApp()));
   _scheduleBackgroundInit();
 }

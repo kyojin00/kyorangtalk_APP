@@ -30,6 +30,22 @@
           }
         },
         {
+          "client_id": "54388432481-t4vsfulsb9kof32l028vtd4b208p6gv9.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kyorang.kyorang_talk",
+            "certificate_hash": "7f2bdf0f51389443fb3729bd8203daa51e1bf4c7"
+          }
+        },
+        {
+          "client_id": "54388432481-u9t7526e2d7285q69cfm0b35ncj5t6n0.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.kyorang.kyorang_talk",
+            "certificate_hash": "6848d0cb41d788ab07702261d9449cb5c07493fb"
+          }
+        },
+        {
           "client_id": "54388432481-o5pgtae98r17uaeaqkqdq6uu5ebobnss.apps.googleusercontent.com",
           "client_type": 3
         }
