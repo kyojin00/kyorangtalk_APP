@@ -4,10 +4,12 @@ import '../../../core/theme/app_theme.dart';
 
 // ═══════════════════════════════════════════════════
 // 🧩 MyProfileScreen 헬퍼 위젯들
-// ⭐ Release 멈춤 수정:
-//   BackdropFilter 전부 제거 → 단순 반투명 (Samsung/MediaTek 행 방지)
-//   여러 BackdropFilter가 한 화면에 중첩되면 일부 기기에서
-//   GPU 렌더 행/무한 루프 발생. 시각 효과는 거의 동일하게 유지.
+// ⭐ BackdropFilter 제거 (Samsung/MediaTek 렌더 행 방지)
+// ⭐ DraggableSticker:
+//    - 일반 Container (크기 0 찌부 방지)
+//    - 이모지 Text 에 color 미지정 (컬러 이모지 정상 렌더링)
+//    - textDirection 명시
+//    - behavior: opaque (빈 영역도 탭/드래그)
 // ═══════════════════════════════════════════════════
 
 // ───────────────────────────────────────────────────
@@ -37,7 +39,7 @@ class DefaultBackground extends StatelessWidget {
 }
 
 // ───────────────────────────────────────────────────
-// 글래스 효과 원형 아이콘 버튼 (BackdropFilter 제거)
+// 글래스 효과 원형 아이콘 버튼
 // ───────────────────────────────────────────────────
 class GlassIconButton extends StatelessWidget {
   final IconData icon;
@@ -70,7 +72,7 @@ class GlassIconButton extends StatelessWidget {
 }
 
 // ───────────────────────────────────────────────────
-// 글래스 효과 텍스트 버튼 (BackdropFilter 제거)
+// 글래스 효과 텍스트 버튼
 // ───────────────────────────────────────────────────
 class GlassTextButton extends StatelessWidget {
   final String label;
@@ -397,9 +399,10 @@ class _DraggableStickerState extends State<DraggableSticker> {
 
   @override
   Widget build(BuildContext context) {
-    final size = 60.0 * widget.scale;
+    double scale = widget.scale;
+    if (!scale.isFinite || scale <= 0) scale = 1.0;
+    final size = 60.0 * scale;
 
-    // NaN/Infinity 방어
     final safeX = _x.isFinite ? _x : 0.0;
     final safeY = _y.isFinite ? _y : 0.0;
 
@@ -407,6 +410,7 @@ class _DraggableStickerState extends State<DraggableSticker> {
       left: safeX - size / 2,
       top: safeY - size / 2,
       child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
         onTap: widget.onTap,
         onPanUpdate: widget.editMode
             ? (details) {
@@ -419,21 +423,22 @@ class _DraggableStickerState extends State<DraggableSticker> {
         onPanEnd: widget.editMode
             ? (_) => widget.onPositionChanged(_x, _y)
             : null,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
+        child: Container(
           width: size,
           height: size,
+          alignment: Alignment.center,
           decoration: widget.editMode
               ? BoxDecoration(
                   shape: BoxShape.circle,
                   border: Border.all(
-                      color: AppTheme.primaryLight.withOpacity(0.6),
+                      color: AppTheme.primaryLight.withOpacity(0.7),
                       width: 2),
                 )
               : null,
-          child: Center(
-            child: Text(widget.emoji,
-                style: TextStyle(fontSize: size * 0.7)),
+          child: Text(
+            widget.emoji,
+            textDirection: TextDirection.ltr,
+            style: TextStyle(fontSize: size * 0.65),
           ),
         ),
       ),

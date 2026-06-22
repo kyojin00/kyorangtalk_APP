@@ -4,12 +4,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 // ═══════════════════════════════════════════════════
 // 🛠 MyProfileService — Supabase 데이터 fetch + 액션 로직
-// 메인 화면 코드 단순화를 위해 분리
-//
-// 사용법:
-//   final service = MyProfileService(myId: _myId!);
-//   final profile = await service.loadProfile();
-//   await service.changeAvatar(file, ext, photosLength);
+// ⭐ addSticker: 새 스티커가 프로필 사진과 겹치지 않도록
+//    아래쪽에 배치 + 개수만큼 대각선 오프셋 (겹침 방지)
 // ═══════════════════════════════════════════════════
 
 class MyProfileService {
@@ -102,13 +98,11 @@ class MyProfileService {
 
     final url = _supabase.storage.from('kyorangtalk').getPublicUrl(path);
 
-    // 프로필 사진 업데이트
     await _supabase
         .from('kyorangtalk_profiles')
         .update({'avatar_url': url})
         .eq('id', myId);
 
-    // 갤러리에도 추가
     final maxPos = _maxPosition(currentPhotos);
     await _supabase.from('kyorangtalk_profile_photos').insert({
       'user_id': myId,
@@ -208,12 +202,26 @@ class MyProfileService {
   // ───────────────────────────────────────────────────
   // 스티커 액션
   // ───────────────────────────────────────────────────
+  // ⭐ 새 스티커는 프로필 사진(중앙 0.4 부근)과 겹치지 않도록
+  //    아래쪽(0.55~)에 배치하고, 기존 개수만큼 대각선으로 어긋나게
   Future<void> addSticker(String emoji) async {
+    final existing = await _supabase
+        .from('kyorangtalk_profile_stickers')
+        .select('id')
+        .eq('user_id', myId);
+    final count = (existing as List).length;
+
+    final offset = count * 0.05;
+    double posX = 0.35 + offset;
+    double posY = 0.55 + offset;
+    if (posX > 0.8) posX = 0.8;
+    if (posY > 0.8) posY = 0.8;
+
     await _supabase.from('kyorangtalk_profile_stickers').insert({
       'user_id': myId,
       'emoji': emoji,
-      'pos_x': 0.5,
-      'pos_y': 0.4,
+      'pos_x': posX,
+      'pos_y': posY,
       'scale': 1.0,
       'rotation': 0.0,
     });

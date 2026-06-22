@@ -15,11 +15,9 @@ import 'photo_viewer_screen.dart';
 import 'sub_profiles_screen.dart';
 
 // ═══════════════════════════════════════════════════
-// MyProfileScreen — 안전 최종본
-// ⭐ 배경 cacheWidth 축소 (OOM 방지)
-// ⭐ 스티커 좌표 clamp (무한 레이아웃 방지)
-// ⭐ 배경 BackdropFilter 제거 (편집 시 단순 반투명)
-// ⭐ currentUser! → _myId 안전 패턴
+// MyProfileScreen
+// ⭐ 스티커는 항상 본문 위 레이어 (프로필 편집 중에만 숨김)
+// ⭐ 새 스티커 기본 위치는 service.addSticker 에서 겹침 방지 처리
 // ═══════════════════════════════════════════════════
 
 class MyProfileScreen extends ConsumerStatefulWidget {
@@ -494,10 +492,10 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                           color: AppTheme.bg,
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        child: Center(
-                          child: Text(emoji,
-                              style: const TextStyle(fontSize: 28)),
-                        ),
+                        alignment: Alignment.center,
+                        child: Text(emoji,
+                            textDirection: TextDirection.ltr,
+                            style: const TextStyle(fontSize: 28)),
                       ),
                     ),
                   );
@@ -515,7 +513,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
     try {
       await _service!.addSticker(emoji);
       await _loadStickers();
-      _showSnack('스티커가 추가됐어요! 드래그해서 위치를 조정하세요');
+      _showSnack('스티커가 추가됐어요! 드래그해서 위치를 옮기세요');
     } catch (e) {
       _showSnack('추가 실패: $e');
     } finally {
@@ -555,6 +553,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                   child: Row(
                     children: [
                       Text(sticker['emoji'] as String,
+                          textDirection: TextDirection.ltr,
                           style: const TextStyle(fontSize: 36)),
                       const SizedBox(width: 12),
                       Text('스티커 편집',
@@ -716,7 +715,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
               child: CircularProgressIndicator(color: AppTheme.primary))
           : Stack(
               children: [
-                // ─── 배경 + 그라데이션 오버레이를 하나로 합침 (레이어 축소) ───
+                // ─── 배경 + 그라데이션 오버레이 ───
                 Positioned.fill(
                   child: GestureDetector(
                     onTap: (background != null &&
@@ -727,7 +726,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        // 배경 이미지 or 기본 배경
                         if (background != null)
                           Image.network(
                             background,
@@ -741,7 +739,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                           )
                         else
                           const DefaultBackground(),
-                        // 그라데이션 오버레이 (같은 Stack 안에 통합)
                         IgnorePointer(
                           child: DecoratedBox(
                             decoration: BoxDecoration(
@@ -759,7 +756,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                             ),
                           ),
                         ),
-                        // 편집 모드 어두운 오버레이
                         if (_editing)
                           IgnorePointer(
                             child: ColoredBox(
@@ -771,9 +767,6 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                   ),
                 ),
 
-                // ─── 스티커 ───
-                ..._buildStickers(screenWidth, screenHeight),
-
                 // ─── 본문 ───
                 SafeArea(
                   child: _editing
@@ -784,45 +777,33 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
                           statusMessage: statusMessage,
                         ),
                 ),
+
+                // ─── 스티커 (항상 본문 위 레이어 / 프로필 편집 중에만 숨김) ───
+                if (!_editing)
+                  ..._buildStickers(screenWidth, screenHeight),
               ],
             ),
     );
   }
 
   List<Widget> _buildStickers(double screenWidth, double screenHeight) {
-    return _stickers.map((sticker) {
-      final id = sticker['id'] as String? ?? '';
-      final emoji = sticker['emoji'] as String? ?? '⭐';
-
-      // ⭐ 좌표 검증: null/NaN/Infinity/범위초과 방어
-      double x = (sticker['pos_x'] as num?)?.toDouble() ?? 0.5;
-      double y = (sticker['pos_y'] as num?)?.toDouble() ?? 0.4;
-      double scale = (sticker['scale'] as num?)?.toDouble() ?? 1.0;
-
-      if (!x.isFinite) x = 0.5;
-      if (!y.isFinite) y = 0.4;
-      if (!scale.isFinite) scale = 1.0;
-      x = x.clamp(0.0, 1.0);
-      y = y.clamp(0.0, 1.0);
-      scale = scale.clamp(0.5, 2.5);
-
-      return DraggableSticker(
-        key: ValueKey(id),
-        emoji: emoji,
-        initialX: x * screenWidth,
-        initialY: y * screenHeight,
-        scale: scale,
-        editMode: _stickerMode,
-        onPositionChanged: (newX, newY) {
-          if (_service != null && screenWidth > 0 && screenHeight > 0) {
-            final px = (newX / screenWidth).clamp(0.0, 1.0);
-            final py = (newY / screenHeight).clamp(0.0, 1.0);
-            _service!.updateStickerPosition(id, px, py);
-          }
-        },
-        onTap: _stickerMode ? () => _showStickerOptions(sticker) : null,
-      );
-    }).toList();
+    return [
+      Positioned(
+        left: 50, top: screenHeight * 0.2,
+        child: Container(width: 70, height: 70, color: Colors.red,
+          child: const Center(child: Text('위', style: TextStyle(color: Colors.white, fontSize: 20)))),
+      ),
+      Positioned(
+        left: 50, top: screenHeight * 0.5,
+        child: Container(width: 70, height: 70, color: Colors.green,
+          child: const Center(child: Text('중간', style: TextStyle(color: Colors.white, fontSize: 20)))),
+      ),
+      Positioned(
+        left: 50, top: screenHeight * 0.8,
+        child: Container(width: 70, height: 70, color: Colors.blue,
+          child: const Center(child: Text('아래', style: TextStyle(color: Colors.white, fontSize: 20)))),
+      ),
+    ];
   }
 
 
@@ -838,6 +819,17 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
       physics: const BouncingScrollPhysics(),
       child: Column(
         children: [
+          Container(
+            width: double.infinity,
+            color: Colors.red,
+            padding: const EdgeInsets.all(8),
+            child: Text(
+              '스티커 ${_stickers.length}개: ' +
+                  _stickers.map((s) => s['emoji']).join(' '),
+              style: const TextStyle(color: Colors.white, fontSize: 24),
+              textDirection: TextDirection.ltr,
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
             child: Row(
@@ -1042,7 +1034,7 @@ class _MyProfileScreenState extends ConsumerState<MyProfileScreen> {
   }
 
   // ═══════════════════════════════════════════════════
-  // 편집 레이아웃 (BackdropFilter 제거됨)
+  // 편집 레이아웃
   // ═══════════════════════════════════════════════════
   Widget _buildEditingLayout(String? avatar, String currentNickname) {
     final nicknameLen = _nicknameController.text.characters.length;

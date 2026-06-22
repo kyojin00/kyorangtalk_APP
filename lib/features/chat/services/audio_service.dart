@@ -175,10 +175,15 @@ class AudioPlayerService {
       _playingController.add(messageId);
 
       // 로컬 파일 vs URL 구분
+      // 로컬 파일 vs URL 구분
       if (source.startsWith('http')) {
         await _player!.setUrl(source);
       } else {
-        await _player!.setFilePath(source);
+        // file:// 스킴이 붙어 있으면 제거 (복원된 음성 대응)
+        final filePath = source.startsWith('file://')
+            ? Uri.parse(source).toFilePath()
+            : source;
+        await _player!.setFilePath(filePath);
       }
       
       await _player!.setSpeed(speed);
